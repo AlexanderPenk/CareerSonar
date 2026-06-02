@@ -226,7 +226,7 @@ Respond with ONLY this JSON, no prose:
 
 const EMPTY_PROFILE = { headline: "", skills: [], evidence: "", positioning: "" };
 const EMPTY_CRITERIA = { titles: "", roleCharacteristics: [], exampleCompanies: [], workMode: "Remote only", seniority: "", locations: "", industries: "", mustHaves: "", comp: "", bias: "" };
-const WORKMODES = ["Remote only", "Hybrid in my city OK", "Open to relocation"];
+const WORKMODES = ["Remote only", "Hybrid in my city OK", "In office", "Open to relocation", "Open to any setup"];
 const EMPTY_SETTINGS = { breadth: 8, autoScan: false, verifyOnScan: true, lastScan: 0, msgTone: "Warm & direct", msgLength: "Standard", msgMetrics: false, msgLang: "Auto", msgSign: "", msgGuidance: "" };
 const TONES = ["Warm & direct", "Formal & precise", "Casual & punchy", "Consultative"];
 const LENGTHS = ["Concise", "Standard", "Detailed"];
