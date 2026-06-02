@@ -148,6 +148,8 @@ CRITICAL accuracy rules — precision matters far more than quantity:
   · "Remote only" → ONLY fully-remote roles whose remote scope covers the candidate's country/region; EXCLUDE every hybrid or on-site role regardless of territory (e.g. "London (Hybrid)" is excluded for a Madrid-based remote candidate).
   · "Hybrid in my city OK" → remote roles, plus hybrid/on-site roles located in the candidate's own city/metro only.
   · "Open to relocation" → any location.
+  · "In office" → on-site or hybrid roles located in the candidate's own city/metro; exclude fully-remote roles and roles in other cities.
+   · "Open to any setup" → the candidate accepts any arrangement; do NOT exclude or down-rank any role based on work location or remote/hybrid/on-site status.
 - Do NOT infer, guess, or pad. Never include a role just because the company "probably" hires for it. No fabricated, homepage-only, or aggregator links.
 - Returning fewer real, verifiable roles (even 1-2) is far better than more uncertain ones. If you can confirm none, return [].
 - "link" must be the exact posting URL; "source" = where you found it (e.g. "Greenhouse", "LinkedIn Jobs", "company careers").
