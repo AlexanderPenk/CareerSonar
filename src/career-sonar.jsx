@@ -62,7 +62,14 @@ async function callClaude(content, useSearch, attempt = 0) {
    * ------------------------------------------------------------------ */
   void content; void useSearch; void attempt;
   await sleep(150);
-  throw new Error("AI features connect in the next setup step. Everything else (Profile, Criteria, Cockpit, Tracker, filters) works now.");
+  const res = await fetch("/api/claude", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ content, useSearch }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || ("API error " + res.status));
+  return data.text || "";
 }
 
 /* ---------- robust JSON salvage ---------- */
