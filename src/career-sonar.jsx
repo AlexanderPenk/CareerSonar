@@ -60,8 +60,6 @@ async function callClaude(content, useSearch, attempt = 0) {
    *                                                                     *
    *  (The backend holds the key and talks to Anthropic safely.)         *
    * ------------------------------------------------------------------ */
-  void content; void useSearch; void attempt;
-  await sleep(150);
   const res = await fetch("/api/claude", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -149,7 +147,7 @@ CRITICAL accuracy rules — precision matters far more than quantity:
   · "Hybrid in my city OK" → remote roles, plus hybrid/on-site roles located in the candidate's own city/metro only.
   · "Open to relocation" → any location.
   · "In office" → on-site or hybrid roles located in the candidate's own city/metro; exclude fully-remote roles and roles in other cities.
-   · "Open to any setup" → the candidate accepts any arrangement; do NOT exclude or down-rank any role based on work location or remote/hybrid/on-site status.
+  · "Open to any setup" → the candidate accepts any arrangement; do NOT exclude or down-rank any role based on work location or remote/hybrid/on-site status.
 - Do NOT infer, guess, or pad. Never include a role just because the company "probably" hires for it. No fabricated, homepage-only, or aggregator links.
 - Returning fewer real, verifiable roles (even 1-2) is far better than more uncertain ones. If you can confirm none, return [].
 - "link" must be the exact posting URL; "source" = where you found it (e.g. "Greenhouse", "LinkedIn Jobs", "company careers").
@@ -158,6 +156,32 @@ Add "posted": short freshness note if known (e.g. "2d","this week"), else "". Ke
 
 Respond with ONLY a compact minified JSON array — no markdown, no prose, no notes:
 [{"company":"","title":"","location":"","link":"","source":"","score":0,"posted":"","fit":"","signal":""}]`;
+
+const buildScorePrompt = (profile, criteria, roles) => `You are scoring how well each job fits THIS candidate. Use only the information given; do NOT search. Return ONLY compact minified JSON.
+
+CANDIDATE
+- Headline: ${profile.headline || "n/a"}
+- Key skills: ${toArr(profile.skills).join(", ") || "n/a"}
+- Evidence: ${profile.evidence || "n/a"}
+- Positioning: ${profile.positioning || "n/a"}
+
+CRITERIA
+- Target titles: ${criteria.titles || "n/a"}
+- Seniority: ${criteria.seniority || "n/a"}
+- Base & acceptable locations: ${criteria.locations || "n/a"}
+- Work mode: ${criteria.workMode || "Remote only"}
+- Industries: ${criteria.industries || "n/a"}
+- Must-haves: ${criteria.mustHaves || "n/a"}
+- Role characteristics wanted: ${toArr(criteria.roleCharacteristics).join(", ") || "n/a"}
+- Reference companies (calibration, not a filter): ${toArr(criteria.exampleCompanies).join(", ") || "n/a"}
+- Extra: ${criteria.bias || "n/a"}
+
+ROLES TO SCORE:
+${roles.map((r) => `${r.n}. ${r.title} — ${r.company} (${r.location || "location n/a"})`).join("\n")}
+
+For each role return "n" (its number), "score" (integer 0-100 fit — weigh title & seniority match, work-location compatibility per the work mode, industry, wanted role characteristics, and similarity to the reference companies; calibrate honestly: 85-100 excellent, 65-84 good, 40-64 partial, below 40 weak; do not inflate), "fit" (under 10 words on why), "signal" (under 6 words). Score ONLY the roles listed; never invent roles.
+
+Respond with ONLY a compact minified JSON array: [{"n":1,"score":0,"fit":"","signal":""}]`;
 
 const buildResearchPrompt = (profile, company, title, location) => `You are Company Sonar. Research this company and map the candidate's three-persona ICP for one role.
 
@@ -240,6 +264,9 @@ export default function App() {
   const [profile, setProfile] = useState(EMPTY_PROFILE);
   const [criteria, setCriteria] = useState(EMPTY_CRITERIA);
   const [settings, setSettings] = useState(EMPTY_SETTINGS);
+  const [watchlist, setWatchlist] = useState([]);
+  const [pulling, setPulling] = useState(false);
+  const [scoring, setScoring] = useState(false);
   const [profileSaved, setProfileSaved] = useState(false);
   const [criteriaSaved, setCriteriaSaved] = useState(false);
 
@@ -262,6 +289,7 @@ export default function App() {
       setCriteria({ ...EMPTY_CRITERIA, ...(await loadKey("cs_criteria", {})) });
       setSettings({ ...EMPTY_SETTINGS, ...(await loadKey("cs_settings", {})) });
       setFound(await loadKey("cs_found", []));
+      setWatchlist(await loadKey("cs_watchlist", []));
       const pipe = await loadKey("cs_pipeline", []);
       setPipeline(pipe);
       const firstOpen = pipe.find((t) => !t.applied); if (firstOpen) setSelId(firstOpen.id);
@@ -326,6 +354,61 @@ export default function App() {
       }
     } catch (e) { setErr("Role Sonar failed: " + e.message); }
     setScanStatus(""); setLoadingRoles(false);
+  }
+
+  function saveWatchlist(next) { setWatchlist(next); saveKey("cs_watchlist", next); }
+
+  async function pullLive() {
+    if (!watchlist.length) { setErr("Add at least one target company in Search Criteria first."); setTab("criteria"); return; }
+    setErr(""); setPulling(true); setScanStatus("pulling live roles from your companies…");
+    try {
+      const res = await fetch("/api/jobs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ companies: watchlist.map((c) => ({ source: c.source, id: c.token, name: c.name || c.token })) }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || ("Jobs API error " + res.status));
+      const jobs = Array.isArray(data.jobs) ? data.jobs : [];
+      const seen = new Set(found.map(roleKey));
+      const fresh = [];
+      for (const j of jobs) {
+        if (!j.company || !j.title) continue;
+        const k = roleKey(j); if (seen.has(k)) continue; seen.add(k);
+        fresh.push({ id: Date.now() + "" + Math.random().toString(36).slice(2, 6), company: j.company, title: j.title, location: j.location || "", link: j.link || "", source: j.source || "", fit: "", signal: "", posted: j.posted || "", score: null, foundAt: Date.now(), live: true, verify: { status: "open", note: "From live ATS feed" } });
+      }
+      const merged = [...fresh, ...found];
+      setFound(merged); saveKey("cs_found", merged);
+      setLastFresh(fresh.length);
+    } catch (e) { setErr("Live pull failed: " + e.message); }
+    setScanStatus(""); setPulling(false);
+  }
+
+  async function scoreRoles() {
+    const targets = found.filter((r) => !r.outdated && r.score == null);
+    if (!targets.length) { setErr("No unscored roles — everything's already scored."); return; }
+    setErr(""); setScoring(true);
+    try {
+      let working = [...found];
+      const size = 12;
+      for (let i = 0; i < targets.length; i += size) {
+        const chunk = targets.slice(i, i + size).map((r, idx) => ({ n: idx + 1, _id: r.id, company: r.company, title: r.title, location: r.location }));
+        setScanStatus(`scoring ${Math.min(i + size, targets.length)}/${targets.length}…`);
+        const arr = extractJSON(await callClaude(buildScorePrompt(profile, criteria, chunk), false));
+        const byN = {};
+        (Array.isArray(arr) ? arr : []).forEach((o) => { if (o && o.n != null) byN[o.n] = o; });
+        working = working.map((r) => {
+          const c = chunk.find((x) => x._id === r.id);
+          if (!c) return r;
+          const o = byN[c.n];
+          if (!o) return r;
+          const sc = Number.isFinite(+o.score) ? Math.max(0, Math.min(100, Math.round(+o.score))) : r.score;
+          return { ...r, score: sc, fit: o.fit || r.fit, signal: o.signal || r.signal };
+        });
+        setFound(working); saveKey("cs_found", working);
+      }
+    } catch (e) { setErr("Scoring failed: " + e.message); }
+    setScanStatus(""); setScoring(false);
   }
 
   async function mapRoleICP(id) {
@@ -423,8 +506,8 @@ export default function App() {
 
       <div style={{ padding: 22 }}>
         {tab === "profile" && <Profile profile={profile} setProfile={setProfile} save={saveProfile} saved={profileSaved} applyExtract={applyExtract} goCriteria={() => setTab("criteria")} />}
-        {tab === "criteria" && <Criteria criteria={criteria} setCriteria={setCriteria} save={saveCriteria} saved={criteriaSaved} ready={criteriaReady} runSonar={() => { setTab("sonar"); findRoles(); }} />}
-        {tab === "sonar" && <Sonar found={found} ready={criteriaReady} find={findRoles} loading={loadingRoles} scanStatus={scanStatus} lastScan={settings.lastScan} lastFresh={lastFresh} roleBusy={roleBusy} mapICP={mapRoleICP} add={addToPipeline} removeFound={removeFound} verifyFound={verifyFound} verifyBusy={verifyBusy} restoreFound={restoreFound} workMode={criteria.workMode} pipeline={pipeline} goCriteria={() => setTab("criteria")} goSettings={() => setTab("settings")} />}
+        {tab === "criteria" && <Criteria criteria={criteria} setCriteria={setCriteria} save={saveCriteria} saved={criteriaSaved} ready={criteriaReady} watchlist={watchlist} saveWatchlist={saveWatchlist} runSonar={() => { setTab("sonar"); findRoles(); }} />}
+        {tab === "sonar" && <Sonar found={found} ready={criteriaReady} find={findRoles} loading={loadingRoles} pullLive={pullLive} pulling={pulling} scoreRoles={scoreRoles} scoring={scoring} hasWatchlist={watchlist.length > 0} scanStatus={scanStatus} lastScan={settings.lastScan} lastFresh={lastFresh} roleBusy={roleBusy} mapICP={mapRoleICP} add={addToPipeline} removeFound={removeFound} verifyFound={verifyFound} verifyBusy={verifyBusy} restoreFound={restoreFound} workMode={criteria.workMode} pipeline={pipeline} goCriteria={() => setTab("criteria")} goSettings={() => setTab("settings")} />}
         {tab === "pipeline" && <Cockpit targets={openTargets} sel={sel} setSelId={setSelId} remove={removeTarget} research={researchTarget} draft={draftOutreach} busy={busy} patch={patchTarget} markApplied={markApplied} verifyTarget={verifyTarget} verifyBusy={verifyBusy} markOutdated={markOutdated} settings={settings} goSettings={() => setTab("settings")} appliedCount={appliedTargets.length} goSonar={() => setTab("sonar")} goTracker={() => setTab("tracker")} />}
         {tab === "tracker" && <Tracker targets={appliedTargets} patch={patchTarget} unApply={unApply} remove={removeTarget} goCockpit={() => setTab("pipeline")} />}
         {tab === "settings" && <SettingsTab settings={settings} update={updateSettings} foundCount={found.length} clearHistory={clearHistory} />}
@@ -515,8 +598,16 @@ Use "" for anything unknown. Keep "evidence" under ~80 words.`;
 }
 
 /* ---------------- 02 · Search Criteria ---------------- */
-function Criteria({ criteria, setCriteria, save, saved, ready, runSonar }) {
+function Criteria({ criteria, setCriteria, save, saved, ready, watchlist, saveWatchlist, runSonar }) {
   const up = (k) => (v) => setCriteria({ ...criteria, [k]: v });
+  const [wSrc, setWSrc] = useState("greenhouse");
+  const [wTok, setWTok] = useState("");
+  const [wName, setWName] = useState("");
+  const addCompany = () => {
+    const tok = wTok.trim(); if (!tok) return;
+    saveWatchlist([...(watchlist || []), { id: Date.now() + "", source: wSrc, token: tok, name: (wName.trim() || tok) }]);
+    setWTok(""); setWName("");
+  };
   return (
     <div style={{ maxWidth: 860 }}>
       <SectionTitle n="02" title="Role Search Criteria" desc="What you want — the demand side. This is the filter Role Sonar uses to find and rank openings." />
@@ -535,6 +626,28 @@ function Criteria({ criteria, setCriteria, save, saved, ready, runSonar }) {
       <ChipInput label="Role characteristics" hint="what the role should involve — type and press Enter" items={criteria.roleCharacteristics} setItems={up("roleCharacteristics")} ph="e.g. Building a team, Managing a team, Owning revenue, Hands-on sales" color={C.amber} />
       <ChipInput label="Reference companies" hint="5-10 that capture the fit you want (industry, product, size) — for calibration, not a filter" items={criteria.exampleCompanies} setItems={up("exampleCompanies")} ph="e.g. Personio, Celonis, DeepL, Pigment, Cohere" color={C.violet} />
       <Field label="Extra search bias" hint="free text to steer the scan" area value={criteria.bias} onChange={up("bias")} ph="AI-native companies, founder-led, avoid agencies / consultancies" />
+      <div style={{ marginBottom: 18, border: `1px solid ${C.line}`, borderRadius: 10, padding: 16, background: C.panel2 }}>
+        <label style={{ fontFamily: MONO, fontSize: 11, letterSpacing: .5, color: C.text, display: "block", marginBottom: 4, fontWeight: 700 }}>Target companies — live job feeds</label>
+        <p style={{ margin: "0 0 12px", color: C.dim, fontSize: 12, lineHeight: 1.5 }}>Role Sonar pulls <b>real, currently-open</b> roles directly from these companies' application systems. Find the token in a company's careers URL: boards.greenhouse.io/<b>token</b> · jobs.lever.co/<b>token</b> · jobs.ashbyhq.com/<b>token</b>.</p>
+        {(watchlist || []).map((c) => (
+          <div key={c.id} style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 6, flexWrap: "wrap" }}>
+            <span style={{ fontFamily: MONO, fontSize: 10, fontWeight: 700, color: "#fff", background: C.teal, borderRadius: 6, padding: "3px 8px" }}>{c.source}</span>
+            <span style={{ fontFamily: MONO, fontSize: 11, color: C.dim }}>{c.token}</span>
+            <span style={{ fontSize: 12.5, color: C.text, fontWeight: 600 }}>{c.name}</span>
+            <button onClick={() => saveWatchlist(watchlist.filter((x) => x.id !== c.id))} style={{ marginLeft: "auto", background: "transparent", border: "none", cursor: "pointer", color: C.faint, fontFamily: MONO, fontSize: 10.5 }}>remove</button>
+          </div>
+        ))}
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10, alignItems: "center" }}>
+          <select value={wSrc} onChange={(e) => setWSrc(e.target.value)} style={{ padding: "9px 10px", borderRadius: 8, border: `1px solid ${C.line}`, background: C.panel, color: C.text, fontFamily: MONO, fontSize: 11.5 }}>
+            <option value="greenhouse">greenhouse</option>
+            <option value="lever">lever</option>
+            <option value="ashby">ashby</option>
+          </select>
+          <input value={wTok} onChange={(e) => setWTok(e.target.value)} placeholder="token (e.g. datsolutions)" style={{ flex: "1 1 180px", padding: "9px 11px", borderRadius: 8, border: `1px solid ${C.line}`, background: C.panel, color: C.text, fontFamily: MONO, fontSize: 12 }} />
+          <input value={wName} onChange={(e) => setWName(e.target.value)} placeholder="company name (optional)" style={{ flex: "1 1 160px", padding: "9px 11px", borderRadius: 8, border: `1px solid ${C.line}`, background: C.panel, color: C.text, fontSize: 13 }} />
+          <button onClick={addCompany} style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "9px 14px", borderRadius: 8, cursor: "pointer", border: `1px solid ${C.teal}`, background: C.panel, color: C.teal, fontFamily: MONO, fontSize: 11, fontWeight: 700 }}><Plus size={13} /> ADD</button>
+        </div>
+      </div>
       <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
         <SaveBtn onClick={save} saved={saved} label="SAVE CRITERIA" />
         <button onClick={runSonar} disabled={!ready} className="cs-cta" style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "12px 20px", borderRadius: 10, fontFamily: MONO, fontSize: 12 }}><Search size={14} /> RUN ROLE SONAR</button>
@@ -548,7 +661,8 @@ function Criteria({ criteria, setCriteria, save, saved, ready, runSonar }) {
 function Pill({ active, onClick, children, color = C.teal }) {
   return <button onClick={onClick} style={{ padding: "5px 10px", borderRadius: 7, cursor: "pointer", fontFamily: MONO, fontSize: 10.5, letterSpacing: .3, border: `1px solid ${active ? color : C.line}`, background: active ? C.panel2 : "transparent", color: active ? color : C.dim }}>{children}</button>;
 }
-function Sonar({ found, ready, find, loading, scanStatus, lastScan, lastFresh, roleBusy, mapICP, add, removeFound, verifyFound, verifyBusy, restoreFound, workMode, pipeline, goCriteria, goSettings }) {
+function Sonar({ found, ready, find, loading, pullLive, pulling, scoreRoles, scoring, hasWatchlist, scanStatus, lastScan, lastFresh, roleBusy, mapICP, add, removeFound, verifyFound, verifyBusy, restoreFound, workMode, pipeline, goCriteria, goSettings }) {
+  const unscored = found.filter((r) => !r.outdated && r.score == null).length;
   const [minScore, setMin] = useState(0);
   const [loc, setLoc] = useState("all");
   const [recency, setRecency] = useState("all");
@@ -579,8 +693,10 @@ function Sonar({ found, ready, find, loading, scanStatus, lastScan, lastFresh, r
     <div>
       <SectionTitle n="03" title="Role Sonar" desc="Found roles accumulate here over time — each scan adds new ones and never repeats what it already found. Map the ICP per role, then send the best to your Cockpit." />
       <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", marginBottom: 16 }}>
-        <button onClick={find} disabled={loading} className="cs-cta" style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "12px 20px", borderRadius: 10, fontFamily: MONO, fontSize: 12 }}>{loading ? <Spin /> : <RefreshCw size={14} />} {loading ? "SCANNING… ~20–40s" : found.length ? "SCAN FOR NEW" : "FIND ROLES"}</button>
-        <span style={{ fontFamily: MONO, fontSize: 10.5, color: C.dim }}>{loading && scanStatus ? <span style={{ color: C.teal }}>{scanStatus}</span> : <>last scan: {lastScan ? agoLabel(lastScan) : "never"}{lastFresh != null && <span style={{ color: lastFresh ? C.teal : C.faint }}> · +{lastFresh} new</span>}</>}</span>
+        <button onClick={pullLive} disabled={pulling || loading} className="cs-cta" style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "12px 20px", borderRadius: 10, fontFamily: MONO, fontSize: 12 }}>{pulling ? <Spin /> : <Radar size={14} />} {pulling ? "PULLING LIVE…" : "PULL LIVE ROLES"}</button>
+        <button onClick={find} disabled={loading || pulling} style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "12px 18px", borderRadius: 10, cursor: "pointer", border: `1px solid ${C.line}`, background: C.panel, color: C.dim, fontFamily: MONO, fontSize: 12 }}>{loading ? <Spin /> : <Search size={14} />} {loading ? "AI SCAN… ~20–40s" : "AI WEB SCAN"}</button>
+        <button onClick={scoreRoles} disabled={scoring || !unscored} style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "12px 18px", borderRadius: 10, cursor: unscored ? "pointer" : "default", border: `1px solid ${unscored ? C.teal : C.line}`, background: C.panel, color: unscored ? C.teal : C.faint, fontFamily: MONO, fontSize: 12 }}>{scoring ? <Spin /> : <Sparkles size={14} />} {scoring ? "SCORING…" : `SCORE${unscored ? " (" + unscored + ")" : ""}`}</button>
+        <span style={{ fontFamily: MONO, fontSize: 10.5, color: C.dim }}>{(loading || pulling || scoring) && scanStatus ? <span style={{ color: C.teal }}>{scanStatus}</span> : <>last scan: {lastScan ? agoLabel(lastScan) : "never"}{lastFresh != null && <span style={{ color: lastFresh ? C.teal : C.faint }}> · +{lastFresh} new</span>}{!hasWatchlist && <span style={{ color: C.faint }}> · add target companies in Search Criteria to pull live roles</span>}</>}</span>
         <button onClick={goSettings} style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 6, background: "transparent", border: "none", cursor: "pointer", color: C.faint, fontFamily: MONO, fontSize: 10.5 }}><Cog size={12} /> scan settings</button>
       </div>
 
