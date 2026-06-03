@@ -135,6 +135,22 @@ function inRadius(loc, homeCountries, broadRemote) {
   if (broadRemote && (_isBroad(loc) || codes.size >= 2)) return true;
   return false;
 }
+// Strict version for unfiltered global ATS feeds: must POSITIVELY match the radius.
+function inRadiusStrict(loc, homeCountries, broadRemote) {
+  const home = new Set((homeCountries || []).map((c) => String(c).toUpperCase()));
+  const codes = _jobCodes(loc);
+  for (const c of codes) if (home.has(c)) return true;          // in a home country (e.g. Spain)
+  if (broadRemote && _isBroad(loc)) return true;                // EMEA/Europe/global remote
+  return false;                                                 // drop ambiguous / unrecognized / foreign
+}
+// Keep only roles whose title matches the search intent (the AI-expanded titles, else a leadership-sales fallback).
+function titleRelevant(title, useTitles) {
+  const t = String(title || "").toLowerCase();
+  for (const ut of (useTitles || [])) { const u = String(ut).toLowerCase().trim(); if (u && t.indexOf(u) !== -1) return true; }
+  const fn = /(sales|revenue|gtm|go.?to.?market|commercial|business development|partnership|account management)/;
+  const sr = /(head of|director|\bvp\b|vice president|chief|\bcro\b|\bcso\b|country manager|general manager|\bgm\b|managing director|sales lead|regional lead)/;
+  return fn.test(t) && sr.test(t);
+}
 const daysOpen = (ts) => ts ? Math.max(0, Math.floor((Date.now() - ts) / 86400000)) : 0;
 const agoLabel = (ts) => { const d = daysOpen(ts); return d === 0 ? "today" : d + "d ago"; };
 const fmtDate = (ts) => ts ? new Date(ts).toLocaleDateString(undefined, { day: "2-digit", month: "short" }) : "";
@@ -566,16 +582,20 @@ export default function App() {
         fresh.push({ id: Date.now() + "" + Math.random().toString(36).slice(2, 6), company: j.company, title: j.title, location: j.location || "", link: j.link || "", source: j.source || "Radar", fit: "", signal: "", posted: j.posted || "", score: null, foundAt: Date.now(), radar: true });
       }
 
-      // 2) focus companies (free ATS pull) — same radius filter applied
+      // 2) focus companies (free ATS pull) — strict radius + title relevance, capped
       if (watchlist.length) {
         setScanStatus("pulling roles from your focus companies…");
         try {
           const atsJobs = await pullWatchlistJobs();
+          let added = 0;
           for (const j of atsJobs) {
+            if (added >= 80) break;
             if (!j.company || !j.title) continue;
-            if (!inRadius(j.location, homeCountries, broadRemote)) continue;
+            if (!inRadiusStrict(j.location, homeCountries, broadRemote)) continue;
+            if (!titleRelevant(j.title, useTitles)) continue;
             const k = roleKey(j); if (seen.has(k)) continue; seen.add(k);
             fresh.push({ id: Date.now() + "" + Math.random().toString(36).slice(2, 6), company: j.company, title: j.title, location: j.location || "", link: j.link || "", source: j.source || "", fit: "", signal: "", posted: j.posted || "", score: null, foundAt: Date.now(), live: true, verify: { status: "open", note: "From your focus company's live feed" } });
+            added++;
           }
         } catch (e) { /* radar already succeeded — ignore ATS errors */ }
       }
