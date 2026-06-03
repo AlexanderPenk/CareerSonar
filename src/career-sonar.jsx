@@ -698,7 +698,7 @@ export default function App() {
         {tab === "profile" && <Profile profile={profile} setProfile={setProfile} save={saveProfile} saved={profileSaved} applyExtract={applyExtract} goCriteria={() => setTab("criteria")} />}
         {tab === "criteria" && <Criteria criteria={criteria} setCriteria={setCriteria} save={saveCriteria} saved={criteriaSaved} ready={criteriaReady} watchlist={watchlist} saveWatchlist={saveWatchlist} goCompanies={() => setTab("companies")} />}
         {tab === "companies" && <CompanyEngine criteria={criteria} library={library} suggestCompanies={suggestCompanies} normalizeCompanies={normalizeCompanies} resolveCompanies={resolveCompanies} addToLibrary={addToLibrary} removeFromLibrary={removeFromLibrary} goSonar={() => setTab("sonar")} />}
-        {tab === "sonar" && <Sonar found={found} ready={criteriaReady} find={findRoles} loading={loadingRoles} pullLive={pullLive} pulling={pulling} runRadar={runRadar} radaring={radaring} scoreRoles={scoreRoles} scoring={scoring} clearFound={clearFound} hasWatchlist={watchlist.length > 0} scanStatus={scanStatus} lastScan={settings.lastScan} lastFresh={lastFresh} roleBusy={roleBusy} mapICP={mapRoleICP} add={addToPipeline} removeFound={removeFound} verifyFound={verifyFound} verifyBusy={verifyBusy} restoreFound={restoreFound} workMode={criteria.workMode} pipeline={pipeline} goCriteria={() => setTab("criteria")} goSettings={() => setTab("settings")} />}
+        {tab === "sonar" && <Sonar found={found} ready={criteriaReady} runRadar={runRadar} radaring={radaring} scoreRoles={scoreRoles} scoring={scoring} clearFound={clearFound} scanStatus={scanStatus} lastScan={settings.lastScan} lastFresh={lastFresh} add={addToPipeline} removeFound={removeFound} verifyFound={verifyFound} verifyBusy={verifyBusy} restoreFound={restoreFound} workMode={criteria.workMode} pipeline={pipeline} goCriteria={() => setTab("criteria")} goSettings={() => setTab("settings")} />}
         {tab === "pipeline" && <Cockpit targets={openTargets} sel={sel} setSelId={setSelId} remove={removeTarget} research={researchTarget} draft={draftOutreach} busy={busy} patch={patchTarget} markApplied={markApplied} verifyTarget={verifyTarget} verifyBusy={verifyBusy} markOutdated={markOutdated} settings={settings} goSettings={() => setTab("settings")} appliedCount={appliedTargets.length} goSonar={() => setTab("sonar")} goTracker={() => setTab("tracker")} />}
         {tab === "tracker" && <Tracker targets={appliedTargets} patch={patchTarget} unApply={unApply} remove={removeTarget} goCockpit={() => setTab("pipeline")} />}
         {tab === "settings" && <SettingsTab settings={settings} update={updateSettings} foundCount={found.length} clearHistory={clearHistory} />}
@@ -994,7 +994,7 @@ function CompanyEngine({ criteria, library, suggestCompanies, normalizeCompanies
 function Pill({ active, onClick, children, color = C.teal }) {
   return <button onClick={onClick} style={{ padding: "5px 10px", borderRadius: 7, cursor: "pointer", fontFamily: MONO, fontSize: 10.5, letterSpacing: .3, border: `1px solid ${active ? color : C.line}`, background: active ? C.panel2 : "transparent", color: active ? color : C.dim }}>{children}</button>;
 }
-function Sonar({ found, ready, find, loading, pullLive, pulling, runRadar, radaring, scoreRoles, scoring, clearFound, hasWatchlist, scanStatus, lastScan, lastFresh, roleBusy, mapICP, add, removeFound, verifyFound, verifyBusy, restoreFound, workMode, pipeline, goCriteria, goSettings }) {
+function Sonar({ found, ready, runRadar, radaring, scoreRoles, scoring, clearFound, scanStatus, lastScan, lastFresh, add, removeFound, verifyFound, verifyBusy, restoreFound, workMode, pipeline, goCriteria, goSettings }) {
   const unscored = found.filter((r) => !r.outdated && r.score == null).length;
   const [minScore, setMin] = useState(0);
   const [loc, setLoc] = useState("all");
@@ -1028,8 +1028,8 @@ function Sonar({ found, ready, find, loading, pullLive, pulling, runRadar, radar
       <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", marginBottom: 16 }}>
         <button onClick={runRadar} disabled={radaring || scoring} className="cs-cta" style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "12px 20px", borderRadius: 10, fontFamily: MONO, fontSize: 12 }}>{radaring ? <Spin /> : <Radar size={14} />} {radaring ? "WORKING…" : "RUN RADAR & SCORE"}</button>
         <button onClick={scoreRoles} disabled={scoring || radaring || !unscored} style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "12px 18px", borderRadius: 10, cursor: unscored ? "pointer" : "default", border: `1px solid ${unscored ? C.teal : C.line}`, background: C.panel, color: unscored ? C.teal : C.faint, fontFamily: MONO, fontSize: 12 }}>{scoring ? <Spin /> : <Sparkles size={14} />} {scoring ? "SCORING…" : `SCORE${unscored ? " (" + unscored + ")" : ""}`}</button>
-        {found.length > 0 && <button onClick={clearFound} disabled={radaring || pulling || scoring} style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "12px 14px", borderRadius: 10, cursor: "pointer", border: `1px solid ${C.line}`, background: C.panel, color: C.faint, fontFamily: MONO, fontSize: 11 }}><Trash2 size={13} /> CLEAR</button>}
-        <span style={{ fontFamily: MONO, fontSize: 10.5, color: C.dim }}>{(loading || pulling || scoring) && scanStatus ? <span style={{ color: C.teal }}>{scanStatus}</span> : <>last scan: {lastScan ? agoLabel(lastScan) : "never"}{lastFresh != null && <span style={{ color: lastFresh ? C.teal : C.faint }}> · +{lastFresh} new</span>}</>}</span>
+        {found.length > 0 && <button onClick={clearFound} disabled={radaring || scoring} style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "12px 14px", borderRadius: 10, cursor: "pointer", border: `1px solid ${C.line}`, background: C.panel, color: C.faint, fontFamily: MONO, fontSize: 11 }}><Trash2 size={13} /> CLEAR</button>}
+        <span style={{ fontFamily: MONO, fontSize: 10.5, color: C.dim }}>{(radaring || scoring) && scanStatus ? <span style={{ color: C.teal }}>{scanStatus}</span> : <>last scan: {lastScan ? agoLabel(lastScan) : "never"}{lastFresh != null && <span style={{ color: lastFresh ? C.teal : C.faint }}> · +{lastFresh} new</span>}</>}</span>
         <button onClick={goSettings} style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 6, background: "transparent", border: "none", cursor: "pointer", color: C.faint, fontFamily: MONO, fontSize: 10.5 }}><Cog size={12} /> scan settings</button>
       </div>
 
@@ -1058,8 +1058,8 @@ function Sonar({ found, ready, find, loading, pullLive, pulling, runRadar, radar
         </div>
       )}
 
-      {found.length === 0 && !loading && <p style={{ fontFamily: MONO, fontSize: 12, color: C.dim }}>No roles yet — hit “Find Roles” to run your first scan.</p>}
-      {found.length > 0 && list.length === 0 && !loading && <p style={{ fontFamily: MONO, fontSize: 12, color: C.dim }}>All current roles are filtered out — loosen the filters above{outdatedCount ? `, or “show outdated (${outdatedCount})”` : ""}.</p>}
+      {found.length === 0 && !radaring && <p style={{ fontFamily: MONO, fontSize: 12, color: C.dim }}>No roles yet — hit “Run Radar &amp; Score” to run your first scan.</p>}
+      {found.length > 0 && list.length === 0 && !radaring && <p style={{ fontFamily: MONO, fontSize: 12, color: C.dim }}>All current roles are filtered out — loosen the filters above{outdatedCount ? `, or “show outdated (${outdatedCount})”` : ""}.</p>}
 
       <div style={{ display: "grid", gap: 12 }}>
         {list.map((r) => {
