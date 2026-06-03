@@ -1352,6 +1352,25 @@ function AuthCard({ onAuthed }) {
   );
 }
 
+function Showcase() {
+  const [ok, setOk] = useState(true);
+  if (!ok) return null;
+  return (
+    <div style={{ position: "relative" }}>
+      <div style={{ position: "absolute", inset: "-6% 8% 2%", background: GRAD, filter: "blur(80px)", opacity: .15, borderRadius: 50, zIndex: 0 }} />
+      <div style={{ position: "relative", zIndex: 1, maxWidth: 940, margin: "0 auto", borderRadius: 16, border: `1px solid ${C.line}`, background: C.panel, boxShadow: "0 34px 90px rgba(20,24,60,.18)", overflow: "hidden" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "11px 15px", borderBottom: `1px solid ${C.line}`, background: C.panel2 }}>
+          <span style={{ width: 11, height: 11, borderRadius: "50%", background: "#FF5F57" }} />
+          <span style={{ width: 11, height: 11, borderRadius: "50%", background: "#FEBC2E" }} />
+          <span style={{ width: 11, height: 11, borderRadius: "50%", background: "#28C840" }} />
+          <span style={{ marginLeft: 12, fontFamily: MONO, fontSize: 11, color: C.faint, letterSpacing: .3 }}>careersonar.ai</span>
+        </div>
+        <img src="/hero-screenshot.png" alt="Career Sonar — the Role Sonar scoring live job matches against your profile" onError={() => setOk(false)} style={{ display: "block", width: "100%", height: "auto" }} />
+      </div>
+    </div>
+  );
+}
+
 function Landing({ onAuthed }) {
   const features = [
     [Search, "Screens the whole market for you", "Set your profile, experience, goals and preferences once. Career Sonar scans the market and surfaces the roles that actually fit — so you stop sifting through job boards."],
@@ -1372,12 +1391,15 @@ function Landing({ onAuthed }) {
       `}</style>
       <div className="cs-land" style={{ maxWidth: 1140, margin: "0 auto", padding: "0 22px" }}>
         <header style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "26px 0" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 13 }}>
-            <div style={{ position: "relative", width: 40, height: 40, display: "grid", placeItems: "center" }}>
-              <span style={{ position: "absolute", inset: 0, borderRadius: "50%", border: `1.5px solid ${C.teal}`, animation: "cs-ping2 2.6s cubic-bezier(0,0,.2,1) infinite" }} />
-              <Radar size={26} color={C.teal} />
+          <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+            <div style={{ position: "relative", width: 56, height: 56, display: "grid", placeItems: "center" }}>
+              <span style={{ position: "absolute", inset: 0, borderRadius: "50%", border: `2px solid ${C.teal}`, animation: "cs-ping2 2.6s cubic-bezier(0,0,.2,1) infinite" }} />
+              <Radar size={40} color={C.teal} />
             </div>
-            <GradText style={{ fontFamily: SERIF, letterSpacing: -.6, fontSize: 23, fontWeight: 800 }}>Career Sonar</GradText>
+            <div>
+              <GradText style={{ fontFamily: SERIF, letterSpacing: -.9, fontSize: 33, fontWeight: 800, lineHeight: 1 }}>Career Sonar</GradText>
+              <div style={{ fontFamily: MONO, fontSize: 11, color: C.dim, letterSpacing: 1.4, textTransform: "uppercase", fontWeight: 600, marginTop: 4 }}>find roles · reach the right people</div>
+            </div>
           </div>
           <a href="#start" style={{ fontFamily: MONO, fontSize: 12.5, fontWeight: 700, color: C.teal, textDecoration: "none" }}>Sign in →</a>
         </header>
@@ -1394,6 +1416,11 @@ function Landing({ onAuthed }) {
             </div>
           </div>
           <div style={{ display: "flex", justifyContent: "center" }}><AuthCard onAuthed={onAuthed} /></div>
+        </section>
+
+        <section style={{ padding: "4px 0 64px" }}>
+          <p style={{ textAlign: "center", fontFamily: MONO, fontSize: 12, fontWeight: 700, letterSpacing: 1, color: C.faint, textTransform: "uppercase", margin: "0 0 22px" }}>Every fitting role, scored against your profile — in one view</p>
+          <Showcase />
         </section>
 
         <section style={{ textAlign: "center", padding: "10px 0 50px" }}>
