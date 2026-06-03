@@ -12,13 +12,11 @@ const clean = (s) => (s == null ? "" : String(s)).replace(/<[^>]+>/g, " ").repla
 
 const NAME2CODE = { "united states": "US", "usa": "US", "u.s.": "US", "united kingdom": "GB", "u.k.": "GB", "england": "GB", "germany": "DE", "deutschland": "DE", "spain": "ES", "españa": "ES", "france": "FR", "netherlands": "NL", "ireland": "IE", "portugal": "PT", "italy": "IT", "sweden": "SE", "denmark": "DK", "norway": "NO", "finland": "FI", "poland": "PL", "switzerland": "CH", "austria": "AT", "belgium": "BE", "luxembourg": "LU", "canada": "CA", "india": "IN", "australia": "AU", "singapore": "SG", "mexico": "MX", "brazil": "BR", "argentina": "AR", "colombia": "CO", "chile": "CL", "united arab emirates": "AE", "uae": "AE", "dubai": "AE", "saudi arabia": "SA", "qatar": "QA", "kuwait": "KW", "bahrain": "BH", "oman": "OM" };
 
-// Best-effort set of ISO2 country codes for a job, from structured fields + the location string.
+// ISO2 codes inferred from the job's DISPLAYED location text (what the user sees).
+// We intentionally use the shown location, not the full multi-location list, so a
+// US-headquartered "global remote" posting that merely lists Spain doesn't slip in.
 function jobCodes(j) {
   const s = new Set();
-  const add = (v) => { if (v && /^[A-Za-z]{2}$/.test(String(v).trim())) s.add(String(v).trim().toUpperCase()); };
-  add(j.country_code); add(j.job_country_code);
-  (j.country_codes || []).forEach(add);
-  (j.locations || []).forEach((l) => { if (l) { add(l.country_code); } });
   const locStr = String(j.location || j.long_location || j.short_location || j.country || "").toLowerCase();
   for (const name in NAME2CODE) { if (locStr.indexOf(name) !== -1) s.add(NAME2CODE[name]); }
   return s;
@@ -49,23 +47,20 @@ async function runSearch({ key, titles, countries, patterns, maxAge, limit }) {
   }
 
   const rows = Array.isArray(data.data) ? data.data : Array.isArray(data.results) ? data.results : Array.isArray(data.jobs) ? data.jobs : [];
-  const reqSet = new Set((countries || []).map((c) => String(c).toUpperCase()));
-  const inMarket = rows.filter((j) => {
-    if (!reqSet.size) return true;
-    const codes = jobCodes(j);
-    if (!codes.size) return true; // unknown location -> keep (don't over-drop)
-    for (const c of codes) if (reqSet.has(c)) return true;
-    return false;
-  });
-  const jobs = inMarket.map((j) => {
+  // TheirStack's job_country_code_or already returns only roles that list a target-market
+  // location (incl. remote/multi-region roles applicable from that market), so we keep them
+  // all and just tidy the displayed location.
+  const tidy = (s) => clean(String(s).replace(/\{+\s*remote\s*\}+/gi, "Remote").replace(/,?\s*United States of America/gi, ", USA")).replace(/(,\s*)+/g, ", ").replace(/^,\s*|,\s*$/g, "");
+  const jobs = rows.map((j) => {
     const co = j.company_object || j.company_obj || {};
     const company = clean(j.company || co.name || j.company_name);
     const title = clean(j.job_title || j.title);
-    const loc = clean(j.location || j.long_location || j.short_location || [j.city, j.country].filter(Boolean).join(", "));
-    const remote = j.remote || j.is_remote ? " · Remote" : "";
+    const isRemote = j.remote || j.is_remote || /remote/i.test(String(j.location || ""));
+    let loc = tidy(j.location || j.long_location || j.short_location || [j.city, j.country].filter(Boolean).join(", "));
+    if (isRemote && !/remote/i.test(loc)) loc = loc ? loc + " · Remote" : "Remote";
     const link = j.url || j.final_url || j.source_url || j.apply_url || co.url || "";
     const posted = j.date_posted || j.posted_date || j.discovered_at || "";
-    return { company, title, location: loc + (remote && !/remote/i.test(loc) ? remote : ""), link, source: "Radar (TheirStack)", posted };
+    return { company, title, location: loc, link, source: "Radar (TheirStack)", posted };
   }).filter((j) => j.title && j.company);
 
   const total = (data.metadata && (data.metadata.total_results || data.metadata.total_count)) || undefined;
@@ -84,9 +79,9 @@ export default async function handler(req, res) {
       const patterns = q.pattern ? [].concat(q.pattern) : [];
       const maxAge = Number(q.days) || 30;
       const limit = Math.min(Number(q.limit) || 5, 25);
-      if (!titles.length && !countries.length) { res.status(200).json({ ok: true, hint: "test with ?title=Head of Sales&country=ES&days=30&limit=5" }); return; }
+      if (!titles.length && !countries.length) { res.status(200).json({ ok: true, v: 3, hint: "test with ?title=Head of Sales&country=ES&days=30&limit=5" }); return; }
       const out = await runSearch({ key, titles, countries, patterns, maxAge, limit });
-      res.status(200).json({ count: out.jobs.length, total: out.total, jobs: out.jobs, _debug: out._debug });
+      res.status(200).json({ v: 3, count: out.jobs.length, total: out.total, returned: out.returned, jobs: out.jobs, _debug: out._debug });
       return;
     }
 
@@ -96,7 +91,7 @@ export default async function handler(req, res) {
       const countries = Array.isArray(body.countries) ? body.countries.filter(Boolean) : [];
       const patterns = Array.isArray(body.descriptionPatterns) ? body.descriptionPatterns.filter(Boolean) : [];
       const out = await runSearch({ key, titles, countries, patterns, maxAge: Number(body.maxAgeDays) || 30, limit: Number(body.limit) || 25 });
-      res.status(200).json({ count: out.jobs.length, total: out.total, jobs: out.jobs });
+      res.status(200).json({ v: 3, count: out.jobs.length, total: out.total, returned: out.returned, jobs: out.jobs });
       return;
     }
 
