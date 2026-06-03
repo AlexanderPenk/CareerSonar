@@ -32,7 +32,8 @@ const STAGE_COLOR = { Applied: C.teal, Screening: C.violet, Interviewing: C.ambe
 
 /* ---------- Anthropic API (with retry/backoff on 429 / overload) ---------- */
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-async function callClaude(content, useSearch, attempt = 0) {
+const HAIKU = "claude-haiku-4-5-20251001"; // cheap/fast model for high-frequency structured tasks (scoring, title expansion)
+async function callClaude(content, useSearch, model, attempt = 0) {
   /* ------------------------------------------------------------------ *
    *  ⚠️  AI BACKEND PLACEHOLDER  —  see README.md                        *
    *                                                                     *
@@ -63,13 +64,13 @@ async function callClaude(content, useSearch, attempt = 0) {
   const res = await fetch("/api/claude", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ content, useSearch }),
+    body: JSON.stringify({ content, useSearch, model }),
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     if ((res.status === 429 || res.status === 529) && attempt < 4) {
       await sleep(1200 * Math.pow(2, attempt) + Math.random() * 400);
-      return callClaude(content, useSearch, attempt + 1);
+      return callClaude(content, useSearch, model, attempt + 1);
     }
     const em = data && data.error;
     let msg = typeof em === "string" ? em : (em && (em.message || (em.error && em.error.message))) || ("API error " + res.status);
@@ -437,7 +438,7 @@ export default function App() {
       let useTitles = rawTitles.length ? rawTitles : ["VP Sales", "Head of Sales", "Chief Revenue Officer", "Sales Director", "Country Manager"];
       // expand to similar titles via the LLM (best-effort; falls back to raw titles)
       try {
-        const arr = extractJSON(await callClaude(buildTitleExpansionPrompt(criteria), false));
+        const arr = extractJSON(await callClaude(buildTitleExpansionPrompt(criteria), false, HAIKU));
         if (Array.isArray(arr) && arr.length) useTitles = Array.from(new Set(arr.map((s) => String(s).trim()).filter(Boolean))).slice(0, 14);
       } catch (e) { /* keep raw titles */ }
 
@@ -478,7 +479,7 @@ export default function App() {
       for (let i = 0; i < targets.length; i += size) {
         const chunk = targets.slice(i, i + size).map((r, idx) => ({ n: idx + 1, _id: r.id, company: r.company, title: r.title, location: r.location }));
         setScanStatus(`scoring ${Math.min(i + size, targets.length)}/${targets.length}…`);
-        const arr = extractJSON(await callClaude(buildScorePrompt(profile, criteria, chunk), false));
+        const arr = extractJSON(await callClaude(buildScorePrompt(profile, criteria, chunk), false, HAIKU));
         const byN = {};
         (Array.isArray(arr) ? arr : []).forEach((o) => { if (o && o.n != null) byN[o.n] = o; });
         working = working.map((r) => {
