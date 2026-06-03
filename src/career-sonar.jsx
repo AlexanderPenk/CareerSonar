@@ -67,8 +67,13 @@ async function callClaude(content, useSearch, attempt = 0) {
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
+    if ((res.status === 429 || res.status === 529) && attempt < 4) {
+      await sleep(1200 * Math.pow(2, attempt) + Math.random() * 400);
+      return callClaude(content, useSearch, attempt + 1);
+    }
     const em = data && data.error;
-    const msg = typeof em === "string" ? em : (em && (em.message || (em.error && em.error.message))) || ("API error " + res.status);
+    let msg = typeof em === "string" ? em : (em && (em.message || (em.error && em.error.message))) || ("API error " + res.status);
+    if (res.status === 429) msg = "Anthropic rate limit (429) — too many AI calls in a short time. Wait a minute and retry, or add credit to your Anthropic account to raise the limit.";
     throw new Error(msg);
   }
   return data.text || "";
@@ -761,7 +766,6 @@ function Sonar({ found, ready, find, loading, pullLive, pulling, runRadar, radar
       <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", marginBottom: 16 }}>
         <button onClick={runRadar} disabled={radaring || pulling || loading} className="cs-cta" style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "12px 20px", borderRadius: 10, fontFamily: MONO, fontSize: 12 }}>{radaring ? <Spin /> : <Radar size={14} />} {radaring ? "SCANNING MARKET…" : "RUN RADAR"}</button>
         {hasWatchlist && <button onClick={pullLive} disabled={pulling || radaring || loading} style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "12px 18px", borderRadius: 10, cursor: "pointer", border: `1px solid ${C.line}`, background: C.panel, color: C.dim, fontFamily: MONO, fontSize: 12 }}>{pulling ? <Spin /> : <Building2 size={14} />} {pulling ? "PULLING…" : "PULL WATCHLIST"}</button>}
-        <button onClick={find} disabled={loading || pulling} style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "12px 18px", borderRadius: 10, cursor: "pointer", border: `1px solid ${C.line}`, background: C.panel, color: C.dim, fontFamily: MONO, fontSize: 12 }}>{loading ? <Spin /> : <Search size={14} />} {loading ? "AI SCAN… ~20–40s" : "AI WEB SCAN"}</button>
         <button onClick={scoreRoles} disabled={scoring || !unscored} style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "12px 18px", borderRadius: 10, cursor: unscored ? "pointer" : "default", border: `1px solid ${unscored ? C.teal : C.line}`, background: C.panel, color: unscored ? C.teal : C.faint, fontFamily: MONO, fontSize: 12 }}>{scoring ? <Spin /> : <Sparkles size={14} />} {scoring ? "SCORING…" : `SCORE${unscored ? " (" + unscored + ")" : ""}`}</button>
         <span style={{ fontFamily: MONO, fontSize: 10.5, color: C.dim }}>{(loading || pulling || scoring) && scanStatus ? <span style={{ color: C.teal }}>{scanStatus}</span> : <>last scan: {lastScan ? agoLabel(lastScan) : "never"}{lastFresh != null && <span style={{ color: lastFresh ? C.teal : C.faint }}> · +{lastFresh} new</span>}</>}</span>
         <button onClick={goSettings} style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 6, background: "transparent", border: "none", cursor: "pointer", color: C.faint, fontFamily: MONO, fontSize: 10.5 }}><Cog size={12} /> scan settings</button>
