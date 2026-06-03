@@ -261,13 +261,13 @@ CRITERIA
 - Industries: ${criteria.industries || "n/a"}
 - Must-haves: ${criteria.mustHaves || "n/a"}
 - Role characteristics wanted: ${toArr(criteria.roleCharacteristics).join(", ") || "n/a"}
-- Focus companies (the candidate's priority targets — roles AT these or at very similar companies should score noticeably higher): ${toArr(criteria.exampleCompanies).join(", ") || "n/a"}
+- Focus companies (OPTIONAL bonus list — a role at one of these, or a very similar company, gets a moderate boost; but NOT being on this list is NOT a penalty, since a key purpose is to surface great roles at companies the candidate doesn't yet know): ${toArr(criteria.exampleCompanies).join(", ") || "n/a"}
 - Extra: ${criteria.bias || "n/a"}
 
 ROLES TO SCORE:
 ${roles.map((r) => `${r.n}. ${r.title} — ${r.company} (${r.location || "location n/a"})`).join("\n")}
 
-For each role return "n" (its number), "score" (integer 0-100 fit — weigh title & seniority match, whether it matches the wanted role type (leadership vs IC), target-market/work-location compatibility, industry, wanted role characteristics, and similarity to the reference companies; calibrate honestly: 85-100 excellent, 65-84 good, 40-64 partial, below 40 weak; do not inflate), "fit" (under 10 words on why), "signal" (under 6 words). Score ONLY the roles listed; never invent roles.
+For each role return "n" (its number), "score" (integer 0-100 fit). Judge fit PRIMARILY on: title & seniority match, role type (leadership vs IC), target-market/work-location compatibility, industry/company-type fit, and the wanted role characteristics. A role at a company in the right industry should score on its own merits even if the company is unknown to the candidate — finding strong roles at new companies is a core goal. Being on the focus-companies list is only a moderate bonus on top; being absent from it is NOT a penalty. Calibrate honestly: 85-100 excellent, 65-84 good, 40-64 partial, below 40 weak; do not inflate. Also return "fit" (under 10 words on why), "signal" (under 6 words). Score ONLY the roles listed; never invent roles.
 
 Respond with ONLY a compact minified JSON array: [{"n":1,"score":0,"fit":"","signal":""}]`;
 
