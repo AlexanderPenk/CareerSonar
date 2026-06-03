@@ -40,7 +40,8 @@ async function runSearch({ key, titles, countries, patterns, maxAge, limit }) {
   });
   const data = await r.json().catch(() => ({}));
   if (!r.ok) {
-    const msg = (data && (data.message || data.detail || (Array.isArray(data) && data[0] && data[0].msg))) || ("TheirStack error " + r.status);
+    let msg = (data && (data.message || data.detail || (Array.isArray(data) && data[0] && data[0].msg))) || ("TheirStack error " + r.status);
+    if (r.status === 402) msg = "TheirStack: out of API credits. The free tier gives 200 results/month (1 credit per returned job). Wait for your monthly reset, upgrade your TheirStack plan, or use the watchlist (ATS) pulls which are free. " + (typeof msg === "string" && msg.indexOf("TheirStack error") === -1 ? "(" + msg + ")" : "");
     const err = new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
     err.status = r.status;
     throw err;
@@ -87,9 +88,9 @@ export default async function handler(req, res) {
       const patterns = q.pattern ? [].concat(q.pattern) : [];
       const maxAge = Number(q.days) || 30;
       const limit = Math.min(Number(q.limit) || 5, 25);
-      if (!titles.length && !countries.length) { res.status(200).json({ ok: true, v: 4, hint: "test with ?title=Head of Sales&country=ES&days=30&limit=5" }); return; }
+      if (!titles.length && !countries.length) { res.status(200).json({ ok: true, v: 5, hint: "test with ?title=Head of Sales&country=ES&days=30&limit=5" }); return; }
       const out = await runSearch({ key, titles, countries, patterns, maxAge, limit });
-      res.status(200).json({ v: 4, count: out.jobs.length, total: out.total, returned: out.returned, jobs: out.jobs, _debug: out._debug });
+      res.status(200).json({ v: 5, count: out.jobs.length, total: out.total, returned: out.returned, jobs: out.jobs, _debug: out._debug });
       return;
     }
 
@@ -99,7 +100,7 @@ export default async function handler(req, res) {
       const countries = Array.isArray(body.countries) ? body.countries.filter(Boolean) : [];
       const patterns = Array.isArray(body.descriptionPatterns) ? body.descriptionPatterns.filter(Boolean) : [];
       const out = await runSearch({ key, titles, countries, patterns, maxAge: Number(body.maxAgeDays) || 30, limit: Number(body.limit) || 25 });
-      res.status(200).json({ v: 4, count: out.jobs.length, total: out.total, returned: out.returned, jobs: out.jobs });
+      res.status(200).json({ v: 5, count: out.jobs.length, total: out.total, returned: out.returned, jobs: out.jobs });
       return;
     }
 
