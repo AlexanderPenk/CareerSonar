@@ -222,7 +222,7 @@ CRITERIA
 - Industries: ${criteria.industries || "n/a"}
 - Must-haves: ${criteria.mustHaves || "n/a"}
 - Role characteristics wanted: ${toArr(criteria.roleCharacteristics).join(", ") || "n/a"}
-- Reference companies (calibration, not a filter): ${toArr(criteria.exampleCompanies).join(", ") || "n/a"}
+- Focus companies (the candidate's priority targets — roles AT these or at very similar companies should score noticeably higher): ${toArr(criteria.exampleCompanies).join(", ") || "n/a"}
 - Extra: ${criteria.bias || "n/a"}
 
 ROLES TO SCORE:
@@ -502,7 +502,8 @@ export default function App() {
       let patterns = [];
       // expand titles + derive relevant-company patterns via the LLM (best-effort)
       try {
-        const obj = extractJSON(await callClaude(buildRadarQueryPrompt(criteria), false, HAIKU));
+        const focusCriteria = { ...criteria, exampleCompanies: library.length ? library.map((c) => c.company) : criteria.exampleCompanies };
+        const obj = extractJSON(await callClaude(buildRadarQueryPrompt(focusCriteria), false, HAIKU));
         if (obj && Array.isArray(obj.titles) && obj.titles.length) useTitles = Array.from(new Set(obj.titles.map((s) => String(s).trim()).filter(Boolean))).slice(0, 14);
         if (obj && Array.isArray(obj.companyPatterns)) patterns = obj.companyPatterns.map((s) => String(s).trim()).filter(Boolean).slice(0, 10);
       } catch (e) { /* keep raw titles, no patterns */ }
@@ -541,10 +542,11 @@ export default function App() {
     try {
       let working = [...found];
       const size = 12;
+      const scoreCriteria = { ...criteria, exampleCompanies: library.length ? library.map((c) => c.company) : criteria.exampleCompanies };
       for (let i = 0; i < targets.length; i += size) {
         const chunk = targets.slice(i, i + size).map((r, idx) => ({ n: idx + 1, _id: r.id, company: r.company, title: r.title, location: r.location }));
         setScanStatus(`scoring ${Math.min(i + size, targets.length)}/${targets.length}…`);
-        const arr = extractJSON(await callClaude(buildScorePrompt(profile, criteria, chunk), false, HAIKU));
+        const arr = extractJSON(await callClaude(buildScorePrompt(profile, scoreCriteria, chunk), false, HAIKU));
         const byN = {};
         (Array.isArray(arr) ? arr : []).forEach((o) => { if (o && o.n != null) byN[o.n] = o; });
         working = working.map((r) => {
@@ -789,7 +791,6 @@ function Criteria({ criteria, setCriteria, save, saved, ready, watchlist, saveWa
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>{WORKMODES.map((m) => <Pill key={m} active={criteria.workMode === m} onClick={() => up("workMode")(m)} color={C.green}>{m}</Pill>)}</div>
       </div>
       <ChipInput label="Role characteristics" hint="what the role should involve — type and press Enter" items={criteria.roleCharacteristics} setItems={up("roleCharacteristics")} ph="e.g. Building a team, Managing a team, Owning revenue, Hands-on sales" color={C.amber} />
-      <ChipInput label="Reference companies" hint="5-10 that capture the fit you want (industry, product, size) — for calibration, not a filter" items={criteria.exampleCompanies} setItems={up("exampleCompanies")} ph="e.g. Personio, Celonis, DeepL, Pigment, Cohere" color={C.violet} />
       <Field label="Extra search bias" hint="free text to steer the scan" area value={criteria.bias} onChange={up("bias")} ph="AI-native companies, founder-led, avoid agencies / consultancies" />
 
       <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
@@ -808,6 +809,7 @@ function CompanyEngine({ criteria, library, suggestCompanies, resolveCompanies, 
   const [checked, setChecked] = useState({});
   const [suggesting, setSuggesting] = useState(false);
   const [adding, setAdding] = useState(false);
+  const [addingSeeds, setAddingSeeds] = useState(false);
   const [status, setStatus] = useState("");
   const [err, setErr] = useState("");
 
@@ -815,11 +817,27 @@ function CompanyEngine({ criteria, library, suggestCompanies, resolveCompanies, 
   const checkedList = suggestions.filter((s) => checked[s.name]);
   const screenable = library.filter((c) => c.screenable);
 
+  async function doAddSeeds() {
+    const fresh = seeds.filter((s) => s && !inLib.has(s.toLowerCase().trim()));
+    if (!fresh.length) { setErr("Those companies are already in your focus list."); return; }
+    setErr(""); setAddingSeeds(true);
+    try {
+      setStatus(`checking ATS for ${fresh.length} companies…`);
+      const results = await resolveCompanies(fresh.map((name) => ({ name, domain: "" })), (done, total) => setStatus(`checking ATS… ${done}/${total}`));
+      const byName = new Map(results.map((r) => [(r.name || "").toLowerCase().trim(), r]));
+      const items = fresh.map((name) => { const r = byName.get(name.toLowerCase().trim()) || {}; return { name, domain: r.domain || "", ats: r.ats || null, token: r.token || null, screenable: !!r.screenable, jobCount: r.jobCount || 0 }; });
+      addToLibrary(items);
+      setSeeds([]);
+    } catch (e) { setErr("ATS check failed: " + e.message); }
+    setStatus(""); setAddingSeeds(false);
+  }
+
   async function doSuggest() {
     setErr(""); setSuggesting(true); setStatus("finding similar companies…");
     try {
-      const arr = await suggestCompanies(seeds.join(", "));
-      // hide ones already in the library
+      const basis = (seeds.length ? seeds : library.map((c) => c.company)).filter(Boolean);
+      if (!basis.length) { setErr("Add a few focus companies first, then suggest similar ones."); setSuggesting(false); setStatus(""); return; }
+      const arr = await suggestCompanies(basis.join(", "));
       setSuggestions(arr.filter((s) => !inLib.has((s.name || "").toLowerCase().trim())));
       setChecked({});
     } catch (e) { setErr("Suggestion failed: " + e.message); }
@@ -843,12 +861,15 @@ function CompanyEngine({ criteria, library, suggestCompanies, resolveCompanies, 
 
   return (
     <div style={{ maxWidth: 980 }}>
-      <SectionTitle n="03" title="Company Engine" desc="Define the kind of employer you want. Enter a few companies you'd love to work for, get similar ones suggested, then check which we can track for free via their ATS. Your library feeds the free Watchlist pulls in Role Sonar." />
+      <SectionTitle n="03" title="Focus Companies" desc="Companies you most want to work for. Add them here — Career Sonar weights them higher when scoring roles and pulls their open positions for free where their ATS is reachable. This doesn't limit the search: the radar still scans the whole market; these just get priority." />
 
       <div style={{ marginBottom: 18 }}>
-        <ChipInput label="Seed companies" hint="5-10 companies that capture the kind of employer you want" items={seeds} setItems={setSeeds} ph="e.g. Personio, Celonis, DeepL, Pigment, Cohere" color={C.violet} />
-        <button onClick={doSuggest} disabled={suggesting || !seeds.length} className="cs-cta" style={{ marginTop: 12, display: "inline-flex", alignItems: "center", gap: 8, padding: "12px 20px", borderRadius: 10, fontFamily: MONO, fontSize: 12 }}>{suggesting ? <Spin /> : <Sparkles size={14} />} {suggesting ? "SUGGESTING…" : `SUGGEST SIMILAR${seeds.length ? " (" + seeds.length + " seeds)" : ""}`}</button>
-        {status && <span style={{ marginLeft: 12, fontFamily: MONO, fontSize: 10.5, color: C.teal }}>{status}</span>}
+        <ChipInput label="Add focus companies" hint="type a company and press Enter — then add them to your list, or suggest similar ones" items={seeds} setItems={setSeeds} ph="e.g. Personio, Celonis, DeepL, Pigment, Cohere" color={C.violet} />
+        <div style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 12, flexWrap: "wrap" }}>
+          <button onClick={doAddSeeds} disabled={addingSeeds || adding || suggesting || !seeds.length} className="cs-cta" style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "12px 20px", borderRadius: 10, fontFamily: MONO, fontSize: 12 }}>{addingSeeds ? <Spin /> : <Plus size={14} />} {addingSeeds ? "ADDING…" : `ADD TO LIST${seeds.length ? " (" + seeds.length + ")" : ""}`}</button>
+          <button onClick={doSuggest} disabled={suggesting || adding || addingSeeds} style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "12px 18px", borderRadius: 10, cursor: "pointer", border: `1px solid ${C.line}`, background: C.panel, color: C.dim, fontFamily: MONO, fontSize: 12 }}>{suggesting ? <Spin /> : <Sparkles size={14} />} {suggesting ? "SUGGESTING…" : "SUGGEST SIMILAR"}</button>
+          {status && <span style={{ fontFamily: MONO, fontSize: 10.5, color: C.teal }}>{status}</span>}
+        </div>
       </div>
 
       {err && <div style={{ padding: "10px 13px", borderRadius: 8, border: `1px solid ${C.red}`, background: "rgba(220,80,80,.08)", color: C.red, fontSize: 12.5, marginBottom: 14 }}>{err}</div>}
@@ -881,12 +902,12 @@ function CompanyEngine({ criteria, library, suggestCompanies, resolveCompanies, 
 
       <div>
         <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
-          <span style={{ fontFamily: MONO, fontSize: 11, letterSpacing: .5, color: C.dim }}>YOUR LIBRARY</span>
+          <span style={{ fontFamily: MONO, fontSize: 11, letterSpacing: .5, color: C.dim }}>YOUR FOCUS LIST</span>
           <span style={{ fontFamily: MONO, fontSize: 10.5, color: C.faint }}>{library.length} companies · <span style={{ color: screenable.length ? C.green : C.faint }}>{screenable.length} screenable free</span></span>
           {screenable.length > 0 && <button onClick={goSonar} style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 6, background: "transparent", border: "none", cursor: "pointer", color: C.teal, fontFamily: MONO, fontSize: 10.5 }}><Radar size={12} /> pull these in Role Sonar</button>}
         </div>
         {!library.length ? (
-          <div style={{ padding: "18px 16px", border: `1px dashed ${C.line}`, borderRadius: 10, color: C.faint, fontSize: 12.5 }}>No companies yet. Add some above — the ones we can screen via their ATS will be pulled for free in Role Sonar (no TheirStack credits).</div>
+          <div style={{ padding: "18px 16px", border: `1px dashed ${C.line}`, borderRadius: 10, color: C.faint, fontSize: 12.5 }}>No focus companies yet. Add a few above — the ones whose ATS we can reach get pulled for free in Role Sonar (no TheirStack credits), and all of them get extra weight in scoring.</div>
         ) : (
           <div style={{ display: "grid", gap: 7 }}>
             {library.map((c) => (
