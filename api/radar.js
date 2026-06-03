@@ -10,6 +10,20 @@
 
 const clean = (s) => (s == null ? "" : String(s)).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
 
+const NAME2CODE = { "united states": "US", "usa": "US", "u.s.": "US", "united kingdom": "GB", "u.k.": "GB", "england": "GB", "germany": "DE", "deutschland": "DE", "spain": "ES", "españa": "ES", "france": "FR", "netherlands": "NL", "ireland": "IE", "portugal": "PT", "italy": "IT", "sweden": "SE", "denmark": "DK", "norway": "NO", "finland": "FI", "poland": "PL", "switzerland": "CH", "austria": "AT", "belgium": "BE", "luxembourg": "LU", "canada": "CA", "india": "IN", "australia": "AU", "singapore": "SG", "mexico": "MX", "brazil": "BR", "argentina": "AR", "colombia": "CO", "chile": "CL", "united arab emirates": "AE", "uae": "AE", "dubai": "AE", "saudi arabia": "SA", "qatar": "QA", "kuwait": "KW", "bahrain": "BH", "oman": "OM" };
+
+// Best-effort set of ISO2 country codes for a job, from structured fields + the location string.
+function jobCodes(j) {
+  const s = new Set();
+  const add = (v) => { if (v && /^[A-Za-z]{2}$/.test(String(v).trim())) s.add(String(v).trim().toUpperCase()); };
+  add(j.country_code); add(j.job_country_code);
+  (j.country_codes || []).forEach(add);
+  (j.locations || []).forEach((l) => { if (l) { add(l.country_code); } });
+  const locStr = String(j.location || j.long_location || j.short_location || j.country || "").toLowerCase();
+  for (const name in NAME2CODE) { if (locStr.indexOf(name) !== -1) s.add(NAME2CODE[name]); }
+  return s;
+}
+
 async function runSearch({ key, titles, countries, patterns, maxAge, limit }) {
   const payload = {
     posted_at_max_age_days: maxAge > 0 ? maxAge : 30,
@@ -35,7 +49,15 @@ async function runSearch({ key, titles, countries, patterns, maxAge, limit }) {
   }
 
   const rows = Array.isArray(data.data) ? data.data : Array.isArray(data.results) ? data.results : Array.isArray(data.jobs) ? data.jobs : [];
-  const jobs = rows.map((j) => {
+  const reqSet = new Set((countries || []).map((c) => String(c).toUpperCase()));
+  const inMarket = rows.filter((j) => {
+    if (!reqSet.size) return true;
+    const codes = jobCodes(j);
+    if (!codes.size) return true; // unknown location -> keep (don't over-drop)
+    for (const c of codes) if (reqSet.has(c)) return true;
+    return false;
+  });
+  const jobs = inMarket.map((j) => {
     const co = j.company_object || j.company_obj || {};
     const company = clean(j.company || co.name || j.company_name);
     const title = clean(j.job_title || j.title);
@@ -47,7 +69,7 @@ async function runSearch({ key, titles, countries, patterns, maxAge, limit }) {
   }).filter((j) => j.title && j.company);
 
   const total = (data.metadata && (data.metadata.total_results || data.metadata.total_count)) || undefined;
-  return { jobs, total, _debug: Object.keys(data || {}) };
+  return { jobs, total, returned: rows.length, _debug: Object.keys(data || {}) };
 }
 
 export default async function handler(req, res) {
