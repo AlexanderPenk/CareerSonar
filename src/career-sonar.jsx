@@ -167,8 +167,22 @@ Add "posted": short freshness note if known (e.g. "2d","this week"), else "". Ke
 Respond with ONLY a compact minified JSON array — no markdown, no prose, no notes:
 [{"company":"","title":"","location":"","link":"","source":"","score":0,"posted":"","fit":"","signal":""}]`;
 
-const buildTitleExpansionPrompt = (criteria) => `You expand a job seeker's target titles into a focused set of search patterns for matching live job postings. Return ONLY a compact minified JSON array of strings.
+const buildRadarQueryPrompt = (criteria) => `You build search parameters to find relevant LIVE job postings for a job seeker. Return ONLY a compact minified JSON object, no prose.
 
+Target titles: ${criteria.titles || "n/a"}
+Seniority levels wanted: ${(criteria.seniorityLevels || []).join(", ") || criteria.seniority || "any"}
+Role type: ${criteria.roleType || "any"}
+Target industries / company types: ${criteria.industries || "n/a"}
+Reference companies (the kind of employer that fits): ${toArr(criteria.exampleCompanies).join(", ") || "n/a"}
+Preferences / bias: ${criteria.bias || "n/a"}
+
+Return a JSON object with two arrays:
+1. "titles": 8-14 short job-title search patterns (the given titles + close synonyms/variants at the wanted seniority; respect role type — no individual-contributor titles for leadership, and vice versa).
+2. "companyPatterns": 6-10 case-insensitive regex patterns matching the DESCRIPTION of a relevant employer, so only the right kind of company surfaces. Base them on the target industries, reference companies and preferences. Use the form "(?i)\\bKEYWORD\\b" or "(?i)some phrase". Favor distinguishing terms for the target company type (e.g. SaaS, B2B software, artificial intelligence, machine learning, cloud platform, developer tools, API, data platform). These are inclusive OR-matches, so pick terms that real target companies put in their description.
+
+Respond with ONLY: {"titles":["VP Sales","Head of Sales"],"companyPatterns":["(?i)\\bSaaS\\b","(?i)artificial intelligence","(?i)\\bB2B\\b software"]}`;
+
+const buildTitleExpansionPrompt = (criteria) => `You expand a job seeker's target titles into a focused set of search patterns for matching live job postings. Return ONLY a compact minified JSON array of strings.
 Target titles: ${criteria.titles || "n/a"}
 Seniority levels wanted: ${(criteria.seniorityLevels || []).join(", ") || criteria.seniority || "any"}
 Role type: ${criteria.roleType || "any"}
@@ -432,15 +446,17 @@ export default function App() {
   }
 
   async function runRadar() {
-    setErr(""); setRadaring(true); setScanStatus("expanding titles…");
+    setErr(""); setRadaring(true); setScanStatus("building query…");
     try {
       const rawTitles = (criteria.titles || "").split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
       let useTitles = rawTitles.length ? rawTitles : ["VP Sales", "Head of Sales", "Chief Revenue Officer", "Sales Director", "Country Manager"];
-      // expand to similar titles via the LLM (best-effort; falls back to raw titles)
+      let patterns = [];
+      // expand titles + derive relevant-company patterns via the LLM (best-effort)
       try {
-        const arr = extractJSON(await callClaude(buildTitleExpansionPrompt(criteria), false, HAIKU));
-        if (Array.isArray(arr) && arr.length) useTitles = Array.from(new Set(arr.map((s) => String(s).trim()).filter(Boolean))).slice(0, 14);
-      } catch (e) { /* keep raw titles */ }
+        const obj = extractJSON(await callClaude(buildRadarQueryPrompt(criteria), false, HAIKU));
+        if (obj && Array.isArray(obj.titles) && obj.titles.length) useTitles = Array.from(new Set(obj.titles.map((s) => String(s).trim()).filter(Boolean))).slice(0, 14);
+        if (obj && Array.isArray(obj.companyPatterns)) patterns = obj.companyPatterns.map((s) => String(s).trim()).filter(Boolean).slice(0, 10);
+      } catch (e) { /* keep raw titles, no patterns */ }
 
       const markets = (criteria.targetMarkets && criteria.targetMarkets.length) ? criteria.targetMarkets : ["Spain", "Remote EMEA"];
       const codes = Array.from(new Set(markets.flatMap((m) => MARKETS[m] || [])));
@@ -450,7 +466,7 @@ export default function App() {
       const res = await fetch("/api/radar", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ titles: useTitles, countries, maxAgeDays: 30, limit: 25 }),
+        body: JSON.stringify({ titles: useTitles, countries, descriptionPatterns: patterns, maxAgeDays: 30, limit: 25 }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || ("Radar error " + res.status));
