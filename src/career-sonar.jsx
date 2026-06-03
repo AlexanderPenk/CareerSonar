@@ -167,6 +167,14 @@ Add "posted": short freshness note if known (e.g. "2d","this week"), else "". Ke
 Respond with ONLY a compact minified JSON array — no markdown, no prose, no notes:
 [{"company":"","title":"","location":"","link":"","source":"","score":0,"posted":"","fit":"","signal":""}]`;
 
+const buildCompanyNormalizePrompt = (names) => `You clean up company names a user typed. Fix spelling and capitalization to the official company name and provide the company's primary website domain. Return ONLY a compact minified JSON array.
+
+Raw input (one company per item): ${names}
+
+For each input return {"input","name","domain"}: input = the original text, name = the corrected official company name, domain = primary website domain (e.g. "paloaltonetworks.com"). If unsure a company exists, keep your best-guess name and set domain to "". Keep the same order; one object per input; do not merge or drop items.
+
+Respond with ONLY: [{"input":"Crowdstrike","name":"CrowdStrike","domain":"crowdstrike.com"},{"input":"Parlo Alto Network","name":"Palo Alto Networks","domain":"paloaltonetworks.com"}]`;
+
 const buildCompanySuggestPrompt = (seeds, criteria) => `You suggest companies similar to a set of seed companies, to help a job seeker target the right employers. Return ONLY a compact minified JSON array, no prose.
 
 Seed companies: ${seeds || "n/a"}
@@ -449,6 +457,10 @@ export default function App() {
     const arr = extractJSON(await callClaude(buildCompanySuggestPrompt(seeds, criteria), false));
     return Array.isArray(arr) ? arr.filter((c) => c && c.name) : [];
   }
+  async function normalizeCompanies(names) {
+    const arr = extractJSON(await callClaude(buildCompanyNormalizePrompt(names), false));
+    return Array.isArray(arr) ? arr.filter((o) => o && (o.name || o.input)) : [];
+  }
   async function resolveCompanies(list, onProgress) {
     const out = [];
     for (let i = 0; i < list.length; i += 10) {
@@ -659,8 +671,8 @@ export default function App() {
 
       <div style={{ padding: 22 }}>
         {tab === "profile" && <Profile profile={profile} setProfile={setProfile} save={saveProfile} saved={profileSaved} applyExtract={applyExtract} goCriteria={() => setTab("criteria")} />}
-        {tab === "criteria" && <Criteria criteria={criteria} setCriteria={setCriteria} save={saveCriteria} saved={criteriaSaved} ready={criteriaReady} watchlist={watchlist} saveWatchlist={saveWatchlist} runSonar={() => { setTab("sonar"); runRadar(); }} />}
-        {tab === "companies" && <CompanyEngine criteria={criteria} library={library} suggestCompanies={suggestCompanies} resolveCompanies={resolveCompanies} addToLibrary={addToLibrary} removeFromLibrary={removeFromLibrary} goSonar={() => setTab("sonar")} />}
+        {tab === "criteria" && <Criteria criteria={criteria} setCriteria={setCriteria} save={saveCriteria} saved={criteriaSaved} ready={criteriaReady} watchlist={watchlist} saveWatchlist={saveWatchlist} goCompanies={() => setTab("companies")} />}
+        {tab === "companies" && <CompanyEngine criteria={criteria} library={library} suggestCompanies={suggestCompanies} normalizeCompanies={normalizeCompanies} resolveCompanies={resolveCompanies} addToLibrary={addToLibrary} removeFromLibrary={removeFromLibrary} goSonar={() => setTab("sonar")} />}
         {tab === "sonar" && <Sonar found={found} ready={criteriaReady} find={findRoles} loading={loadingRoles} pullLive={pullLive} pulling={pulling} runRadar={runRadar} radaring={radaring} scoreRoles={scoreRoles} scoring={scoring} clearFound={clearFound} hasWatchlist={watchlist.length > 0} scanStatus={scanStatus} lastScan={settings.lastScan} lastFresh={lastFresh} roleBusy={roleBusy} mapICP={mapRoleICP} add={addToPipeline} removeFound={removeFound} verifyFound={verifyFound} verifyBusy={verifyBusy} restoreFound={restoreFound} workMode={criteria.workMode} pipeline={pipeline} goCriteria={() => setTab("criteria")} goSettings={() => setTab("settings")} />}
         {tab === "pipeline" && <Cockpit targets={openTargets} sel={sel} setSelId={setSelId} remove={removeTarget} research={researchTarget} draft={draftOutreach} busy={busy} patch={patchTarget} markApplied={markApplied} verifyTarget={verifyTarget} verifyBusy={verifyBusy} markOutdated={markOutdated} settings={settings} goSettings={() => setTab("settings")} appliedCount={appliedTargets.length} goSonar={() => setTab("sonar")} goTracker={() => setTab("tracker")} />}
         {tab === "tracker" && <Tracker targets={appliedTargets} patch={patchTarget} unApply={unApply} remove={removeTarget} goCockpit={() => setTab("pipeline")} />}
@@ -752,7 +764,7 @@ Use "" for anything unknown. Keep "evidence" under ~80 words.`;
 }
 
 /* ---------------- 02 · Search Criteria ---------------- */
-function Criteria({ criteria, setCriteria, save, saved, ready, watchlist, saveWatchlist, runSonar }) {
+function Criteria({ criteria, setCriteria, save, saved, ready, watchlist, saveWatchlist, goCompanies }) {
   const up = (k) => (v) => setCriteria({ ...criteria, [k]: v });
   const toggleArr = (k, v) => { const cur = criteria[k] || []; setCriteria({ ...criteria, [k]: cur.includes(v) ? cur.filter((x) => x !== v) : [...cur, v] }); };
   return (
@@ -795,7 +807,7 @@ function Criteria({ criteria, setCriteria, save, saved, ready, watchlist, saveWa
 
       <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
         <SaveBtn onClick={save} saved={saved} label="SAVE CRITERIA" />
-        <button onClick={runSonar} disabled={!ready} className="cs-cta" style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "12px 20px", borderRadius: 10, fontFamily: MONO, fontSize: 12 }}><Radar size={14} /> RUN RADAR</button>
+        <button onClick={goCompanies} disabled={!ready} className="cs-cta" style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "12px 20px", borderRadius: 10, fontFamily: MONO, fontSize: 12 }}><Building2 size={14} /> NEXT: FOCUS COMPANIES</button>
         {!ready && <span style={{ fontFamily: MONO, fontSize: 11, color: C.faint }}>add at least a target title</span>}
       </div>
     </div>
@@ -803,13 +815,14 @@ function Criteria({ criteria, setCriteria, save, saved, ready, watchlist, saveWa
 }
 
 /* ---------------- 03 · Companies (Top Company Engine + Library) ---------------- */
-function CompanyEngine({ criteria, library, suggestCompanies, resolveCompanies, addToLibrary, removeFromLibrary, goSonar }) {
+function CompanyEngine({ criteria, library, suggestCompanies, normalizeCompanies, resolveCompanies, addToLibrary, removeFromLibrary, goSonar }) {
   const [seeds, setSeeds] = useState(toArr(criteria.exampleCompanies));
   const [suggestions, setSuggestions] = useState([]);
   const [checked, setChecked] = useState({});
   const [suggesting, setSuggesting] = useState(false);
   const [adding, setAdding] = useState(false);
   const [addingSeeds, setAddingSeeds] = useState(false);
+  const [rechecking, setRechecking] = useState(false);
   const [status, setStatus] = useState("");
   const [err, setErr] = useState("");
 
@@ -817,19 +830,43 @@ function CompanyEngine({ criteria, library, suggestCompanies, resolveCompanies, 
   const checkedList = suggestions.filter((s) => checked[s.name]);
   const screenable = library.filter((c) => c.screenable);
 
+  // normalize names -> [{name, domain}], then ATS-resolve, then return library items
+  async function cleanAndResolve(rawNames) {
+    let pairs = rawNames.map((name) => ({ name, domain: "" }));
+    try {
+      const norm = await normalizeCompanies(rawNames.join(", "));
+      if (Array.isArray(norm) && norm.length) {
+        const byIn = new Map(norm.map((o) => [(o.input || o.name || "").toLowerCase().trim(), o]));
+        pairs = rawNames.map((n) => { const o = byIn.get(n.toLowerCase().trim()) || {}; return { name: o.name || n, domain: o.domain || "" }; });
+      }
+    } catch (_) { /* fall back to raw names */ }
+    const results = await resolveCompanies(pairs, (d, t) => setStatus(`checking ATS… ${d}/${t}`));
+    const byName = new Map(results.map((r) => [(r.name || "").toLowerCase().trim(), r]));
+    return pairs.map((p) => { const r = byName.get(p.name.toLowerCase().trim()) || {}; return { name: p.name, domain: p.domain || r.domain || "", ats: r.ats || null, token: r.token || null, screenable: !!r.screenable, jobCount: r.jobCount || 0 }; });
+  }
+
   async function doAddSeeds() {
-    const fresh = seeds.filter((s) => s && !inLib.has(s.toLowerCase().trim()));
-    if (!fresh.length) { setErr("Those companies are already in your focus list."); return; }
+    const raw = seeds.filter(Boolean);
+    if (!raw.length) return;
     setErr(""); setAddingSeeds(true);
     try {
-      setStatus(`checking ATS for ${fresh.length} companies…`);
-      const results = await resolveCompanies(fresh.map((name) => ({ name, domain: "" })), (done, total) => setStatus(`checking ATS… ${done}/${total}`));
-      const byName = new Map(results.map((r) => [(r.name || "").toLowerCase().trim(), r]));
-      const items = fresh.map((name) => { const r = byName.get(name.toLowerCase().trim()) || {}; return { name, domain: r.domain || "", ats: r.ats || null, token: r.token || null, screenable: !!r.screenable, jobCount: r.jobCount || 0 }; });
+      setStatus("checking spelling & websites…");
+      const items = await cleanAndResolve(raw);
       addToLibrary(items);
       setSeeds([]);
-    } catch (e) { setErr("ATS check failed: " + e.message); }
+    } catch (e) { setErr("Add failed: " + e.message); }
     setStatus(""); setAddingSeeds(false);
+  }
+
+  async function doRecheckAll() {
+    if (!library.length) return;
+    setErr(""); setRechecking(true);
+    try {
+      setStatus("cleaning up your list…");
+      const items = await cleanAndResolve(library.map((c) => c.company).filter(Boolean));
+      addToLibrary(items);
+    } catch (e) { setErr("Re-check failed: " + e.message); }
+    setStatus(""); setRechecking(false);
   }
 
   async function doSuggest() {
@@ -904,7 +941,8 @@ function CompanyEngine({ criteria, library, suggestCompanies, resolveCompanies, 
         <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
           <span style={{ fontFamily: MONO, fontSize: 11, letterSpacing: .5, color: C.dim }}>YOUR FOCUS LIST</span>
           <span style={{ fontFamily: MONO, fontSize: 10.5, color: C.faint }}>{library.length} companies · <span style={{ color: screenable.length ? C.green : C.faint }}>{screenable.length} screenable free</span></span>
-          {screenable.length > 0 && <button onClick={goSonar} style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 6, background: "transparent", border: "none", cursor: "pointer", color: C.teal, fontFamily: MONO, fontSize: 10.5 }}><Radar size={12} /> pull these in Role Sonar</button>}
+          {library.length > 0 && <button onClick={doRecheckAll} disabled={rechecking || addingSeeds || adding} style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 6, background: "transparent", border: "none", cursor: "pointer", color: C.dim, fontFamily: MONO, fontSize: 10.5 }}>{rechecking ? <Spin /> : <Check size={12} />} re-check names & ATS</button>}
+          {screenable.length > 0 && <button onClick={goSonar} style={{ display: "inline-flex", alignItems: "center", gap: 6, background: "transparent", border: "none", cursor: "pointer", color: C.teal, fontFamily: MONO, fontSize: 10.5 }}><Radar size={12} /> pull these in Role Sonar</button>}
         </div>
         {!library.length ? (
           <div style={{ padding: "18px 16px", border: `1px dashed ${C.line}`, borderRadius: 10, color: C.faint, fontSize: 12.5 }}>No focus companies yet. Add a few above — the ones whose ATS we can reach get pulled for free in Role Sonar (no TheirStack credits), and all of them get extra weight in scoring.</div>
