@@ -47,11 +47,19 @@ async function runSearch({ key, titles, countries, patterns, maxAge, limit }) {
   }
 
   const rows = Array.isArray(data.data) ? data.data : Array.isArray(data.results) ? data.results : Array.isArray(data.jobs) ? data.jobs : [];
-  // TheirStack's job_country_code_or already returns only roles that list a target-market
-  // location (incl. remote/multi-region roles applicable from that market), so we keep them
-  // all and just tidy the displayed location.
+  // Filter by the DISPLAYED location: if the shown location names a country and none of
+  // those countries are in the selected markets, drop it (e.g. a US-HQ "global remote" role
+  // shown as "AMER - California"). City-only, pure-remote, or region-only ("EMEA …") stay.
+  const reqSet = new Set((countries || []).map((c) => String(c).toUpperCase()));
+  const inMarket = rows.filter((j) => {
+    if (!reqSet.size) return true;
+    const codes = jobCodes(j);
+    if (!codes.size) return true;
+    for (const c of codes) if (reqSet.has(c)) return true;
+    return false;
+  });
   const tidy = (s) => clean(String(s).replace(/\{+\s*remote\s*\}+/gi, "Remote").replace(/,?\s*United States of America/gi, ", USA")).replace(/(,\s*)+/g, ", ").replace(/^,\s*|,\s*$/g, "");
-  const jobs = rows.map((j) => {
+  const jobs = inMarket.map((j) => {
     const co = j.company_object || j.company_obj || {};
     const company = clean(j.company || co.name || j.company_name);
     const title = clean(j.job_title || j.title);
@@ -79,9 +87,9 @@ export default async function handler(req, res) {
       const patterns = q.pattern ? [].concat(q.pattern) : [];
       const maxAge = Number(q.days) || 30;
       const limit = Math.min(Number(q.limit) || 5, 25);
-      if (!titles.length && !countries.length) { res.status(200).json({ ok: true, v: 3, hint: "test with ?title=Head of Sales&country=ES&days=30&limit=5" }); return; }
+      if (!titles.length && !countries.length) { res.status(200).json({ ok: true, v: 4, hint: "test with ?title=Head of Sales&country=ES&days=30&limit=5" }); return; }
       const out = await runSearch({ key, titles, countries, patterns, maxAge, limit });
-      res.status(200).json({ v: 3, count: out.jobs.length, total: out.total, returned: out.returned, jobs: out.jobs, _debug: out._debug });
+      res.status(200).json({ v: 4, count: out.jobs.length, total: out.total, returned: out.returned, jobs: out.jobs, _debug: out._debug });
       return;
     }
 
@@ -91,7 +99,7 @@ export default async function handler(req, res) {
       const countries = Array.isArray(body.countries) ? body.countries.filter(Boolean) : [];
       const patterns = Array.isArray(body.descriptionPatterns) ? body.descriptionPatterns.filter(Boolean) : [];
       const out = await runSearch({ key, titles, countries, patterns, maxAge: Number(body.maxAgeDays) || 30, limit: Number(body.limit) || 25 });
-      res.status(200).json({ v: 3, count: out.jobs.length, total: out.total, returned: out.returned, jobs: out.jobs });
+      res.status(200).json({ v: 4, count: out.jobs.length, total: out.total, returned: out.returned, jobs: out.jobs });
       return;
     }
 
