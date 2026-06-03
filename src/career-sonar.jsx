@@ -167,6 +167,19 @@ Add "posted": short freshness note if known (e.g. "2d","this week"), else "". Ke
 Respond with ONLY a compact minified JSON array — no markdown, no prose, no notes:
 [{"company":"","title":"","location":"","link":"","source":"","score":0,"posted":"","fit":"","signal":""}]`;
 
+const buildCompanySuggestPrompt = (seeds, criteria) => `You suggest companies similar to a set of seed companies, to help a job seeker target the right employers. Return ONLY a compact minified JSON array, no prose.
+
+Seed companies: ${seeds || "n/a"}
+Target industries / company type: ${criteria.industries || "n/a"}
+Role focus: ${criteria.titles || "n/a"} (${criteria.roleType || "any"})
+Preferences / bias: ${criteria.bias || "n/a"}
+Target markets: ${(criteria.targetMarkets || []).join(", ") || "n/a"}
+
+Return 30-40 REAL companies similar to the seeds (same kind of product, business model and stage) that plausibly hire for the role focus. Prefer companies that operate or hire in the target markets. Do NOT repeat the seed companies. Only include companies you are confident actually exist.
+For each company: {"name","domain","why","category"} — domain is the primary website domain (e.g. "personio.com"), why is under 8 words, category is a 1-3 word type tag.
+
+Respond with ONLY: [{"name":"Celonis","domain":"celonis.com","why":"process mining for enterprises","category":"Process Intelligence"}]`;
+
 const buildRadarQueryPrompt = (criteria) => `You build search parameters to find relevant LIVE job postings for a job seeker. Return ONLY a compact minified JSON object, no prose.
 
 Target titles: ${criteria.titles || "n/a"}
@@ -320,6 +333,7 @@ export default function App() {
   const [criteria, setCriteria] = useState(EMPTY_CRITERIA);
   const [settings, setSettings] = useState(EMPTY_SETTINGS);
   const [watchlist, setWatchlist] = useState([]);
+  const [library, setLibrary] = useState([]);
   const [pulling, setPulling] = useState(false);
   const [scoring, setScoring] = useState(false);
   const [radaring, setRadaring] = useState(false);
@@ -346,6 +360,7 @@ export default function App() {
       setSettings({ ...EMPTY_SETTINGS, ...(await loadKey("cs_settings", {})) });
       setFound(await loadKey("cs_found", []));
       setWatchlist(await loadKey("cs_watchlist", []));
+      setLibrary(await loadKey("cs_library", []));
       const pipe = await loadKey("cs_pipeline", []);
       setPipeline(pipe);
       const firstOpen = pipe.find((t) => !t.applied); if (firstOpen) setSelId(firstOpen.id);
@@ -414,13 +429,47 @@ export default function App() {
 
   function saveWatchlist(next) { setWatchlist(next); saveKey("cs_watchlist", next); }
 
+  // ---- Company library (verified ATS companies; feeds the watchlist for free pulls) ----
+  const libKey = (c) => (c.name || c.company || "").toLowerCase().trim() + "|" + (c.domain || "").toLowerCase().trim();
+  function saveLibrary(next) { setLibrary(next); saveKey("cs_library", next); }
+  function syncWatchlistFromLibrary(lib) {
+    const wl = lib.filter((c) => c.screenable && c.ats && c.token).map((c) => ({ source: c.ats, token: c.token, name: c.company }));
+    saveWatchlist(wl);
+  }
+  function addToLibrary(items) {
+    const map = new Map(library.map((c) => [libKey(c), c]));
+    for (const it of items) {
+      map.set(libKey(it), { id: libKey(it), company: it.name || it.company, domain: it.domain || "", ats: it.ats || null, token: it.token || null, screenable: !!it.screenable, jobCount: it.jobCount || 0, addedAt: Date.now() });
+    }
+    const next = [...map.values()];
+    saveLibrary(next); syncWatchlistFromLibrary(next);
+  }
+  function removeFromLibrary(id) { const next = library.filter((c) => c.id !== id); saveLibrary(next); syncWatchlistFromLibrary(next); }
+  async function suggestCompanies(seeds) {
+    const arr = extractJSON(await callClaude(buildCompanySuggestPrompt(seeds, criteria), false));
+    return Array.isArray(arr) ? arr.filter((c) => c && c.name) : [];
+  }
+  async function resolveCompanies(list, onProgress) {
+    const out = [];
+    for (let i = 0; i < list.length; i += 10) {
+      const chunk = list.slice(i, i + 10);
+      if (onProgress) onProgress(Math.min(i + chunk.length, list.length), list.length);
+      try {
+        const res = await fetch("/api/resolve", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ companies: chunk.map((c) => ({ name: c.name, domain: c.domain })) }) });
+        const data = await res.json().catch(() => ({}));
+        if (Array.isArray(data.results)) out.push(...data.results);
+      } catch (_) { /* keep going */ }
+    }
+    return out;
+  }
+
   function clearFound() {
     if (typeof window !== "undefined" && !window.confirm("Clear all found roles? This empties the list so you can re-run cleanly. This cannot be undone.")) return;
     setFound([]); saveKey("cs_found", []); setLastFresh(null);
   }
 
   async function pullLive() {
-    if (!watchlist.length) { setErr("Add at least one target company in Search Criteria first."); setTab("criteria"); return; }
+    if (!watchlist.length) { setErr("Add companies in the Company Engine (tab 03) first — screenable ones feed this free pull."); setTab("companies"); return; }
     setErr(""); setPulling(true); setScanStatus("pulling live roles from your companies…");
     try {
       const res = await fetch("/api/jobs", {
@@ -564,10 +613,11 @@ export default function App() {
   const TABS = [
     ["profile", "01 · My Profile", User],
     ["criteria", "02 · Search Criteria", SlidersHorizontal],
-    ["sonar", `03 · Role Sonar${found.filter((f) => !f.outdated).length ? " (" + found.filter((f) => !f.outdated).length + ")" : ""}`, Search],
-    ["pipeline", `04 · Cockpit${openTargets.length ? " (" + openTargets.length + ")" : ""}`, Target],
-    ["tracker", `05 · Tracker${appliedTargets.length ? " (" + appliedTargets.length + ")" : ""}`, ClipboardList],
-    ["settings", "06 · Settings", Cog],
+    ["companies", `03 · Companies${library.length ? " (" + library.length + ")" : ""}`, Building2],
+    ["sonar", `04 · Role Sonar${found.filter((f) => !f.outdated).length ? " (" + found.filter((f) => !f.outdated).length + ")" : ""}`, Search],
+    ["pipeline", `05 · Cockpit${openTargets.length ? " (" + openTargets.length + ")" : ""}`, Target],
+    ["tracker", `06 · Tracker${appliedTargets.length ? " (" + appliedTargets.length + ")" : ""}`, ClipboardList],
+    ["settings", "07 · Settings", Cog],
   ];
 
   return (
@@ -608,6 +658,7 @@ export default function App() {
       <div style={{ padding: 22 }}>
         {tab === "profile" && <Profile profile={profile} setProfile={setProfile} save={saveProfile} saved={profileSaved} applyExtract={applyExtract} goCriteria={() => setTab("criteria")} />}
         {tab === "criteria" && <Criteria criteria={criteria} setCriteria={setCriteria} save={saveCriteria} saved={criteriaSaved} ready={criteriaReady} watchlist={watchlist} saveWatchlist={saveWatchlist} runSonar={() => { setTab("sonar"); runRadar(); }} />}
+        {tab === "companies" && <CompanyEngine criteria={criteria} library={library} suggestCompanies={suggestCompanies} resolveCompanies={resolveCompanies} addToLibrary={addToLibrary} removeFromLibrary={removeFromLibrary} goSonar={() => setTab("sonar")} />}
         {tab === "sonar" && <Sonar found={found} ready={criteriaReady} find={findRoles} loading={loadingRoles} pullLive={pullLive} pulling={pulling} runRadar={runRadar} radaring={radaring} scoreRoles={scoreRoles} scoring={scoring} clearFound={clearFound} hasWatchlist={watchlist.length > 0} scanStatus={scanStatus} lastScan={settings.lastScan} lastFresh={lastFresh} roleBusy={roleBusy} mapICP={mapRoleICP} add={addToPipeline} removeFound={removeFound} verifyFound={verifyFound} verifyBusy={verifyBusy} restoreFound={restoreFound} workMode={criteria.workMode} pipeline={pipeline} goCriteria={() => setTab("criteria")} goSettings={() => setTab("settings")} />}
         {tab === "pipeline" && <Cockpit targets={openTargets} sel={sel} setSelId={setSelId} remove={removeTarget} research={researchTarget} draft={draftOutreach} busy={busy} patch={patchTarget} markApplied={markApplied} verifyTarget={verifyTarget} verifyBusy={verifyBusy} markOutdated={markOutdated} settings={settings} goSettings={() => setTab("settings")} appliedCount={appliedTargets.length} goSonar={() => setTab("sonar")} goTracker={() => setTab("tracker")} />}
         {tab === "tracker" && <Tracker targets={appliedTargets} patch={patchTarget} unApply={unApply} remove={removeTarget} goCockpit={() => setTab("pipeline")} />}
@@ -750,7 +801,112 @@ function Criteria({ criteria, setCriteria, save, saved, ready, watchlist, saveWa
   );
 }
 
-/* ---------------- 03 · Role Sonar ---------------- */
+/* ---------------- 03 · Companies (Top Company Engine + Library) ---------------- */
+function CompanyEngine({ criteria, library, suggestCompanies, resolveCompanies, addToLibrary, removeFromLibrary, goSonar }) {
+  const [seeds, setSeeds] = useState(toArr(criteria.exampleCompanies));
+  const [suggestions, setSuggestions] = useState([]);
+  const [checked, setChecked] = useState({});
+  const [suggesting, setSuggesting] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [status, setStatus] = useState("");
+  const [err, setErr] = useState("");
+
+  const inLib = new Set(library.map((c) => (c.company || "").toLowerCase().trim()));
+  const checkedList = suggestions.filter((s) => checked[s.name]);
+  const screenable = library.filter((c) => c.screenable);
+
+  async function doSuggest() {
+    setErr(""); setSuggesting(true); setStatus("finding similar companies…");
+    try {
+      const arr = await suggestCompanies(seeds.join(", "));
+      // hide ones already in the library
+      setSuggestions(arr.filter((s) => !inLib.has((s.name || "").toLowerCase().trim())));
+      setChecked({});
+    } catch (e) { setErr("Suggestion failed: " + e.message); }
+    setStatus(""); setSuggesting(false);
+  }
+  async function doAdd() {
+    if (!checkedList.length) return;
+    setErr(""); setAdding(true);
+    try {
+      setStatus(`checking ATS for ${checkedList.length} companies…`);
+      const results = await resolveCompanies(checkedList, (done, total) => setStatus(`checking ATS… ${done}/${total}`));
+      // merge resolve results back onto the chosen suggestions (keep domain/why)
+      const byName = new Map(results.map((r) => [(r.name || "").toLowerCase().trim(), r]));
+      const items = checkedList.map((c) => { const r = byName.get((c.name || "").toLowerCase().trim()) || {}; return { name: c.name, domain: c.domain || r.domain || "", ats: r.ats || null, token: r.token || null, screenable: !!r.screenable, jobCount: r.jobCount || 0 }; });
+      addToLibrary(items);
+      setSuggestions((prev) => prev.filter((s) => !checked[s.name]));
+      setChecked({});
+    } catch (e) { setErr("ATS check failed: " + e.message); }
+    setStatus(""); setAdding(false);
+  }
+
+  return (
+    <div style={{ maxWidth: 980 }}>
+      <SectionTitle n="03" title="Company Engine" desc="Define the kind of employer you want. Enter a few companies you'd love to work for, get similar ones suggested, then check which we can track for free via their ATS. Your library feeds the free Watchlist pulls in Role Sonar." />
+
+      <div style={{ marginBottom: 18 }}>
+        <ChipInput label="Seed companies" hint="5-10 companies that capture the kind of employer you want" items={seeds} setItems={setSeeds} ph="e.g. Personio, Celonis, DeepL, Pigment, Cohere" color={C.violet} />
+        <button onClick={doSuggest} disabled={suggesting || !seeds.length} className="cs-cta" style={{ marginTop: 12, display: "inline-flex", alignItems: "center", gap: 8, padding: "12px 20px", borderRadius: 10, fontFamily: MONO, fontSize: 12 }}>{suggesting ? <Spin /> : <Sparkles size={14} />} {suggesting ? "SUGGESTING…" : `SUGGEST SIMILAR${seeds.length ? " (" + seeds.length + " seeds)" : ""}`}</button>
+        {status && <span style={{ marginLeft: 12, fontFamily: MONO, fontSize: 10.5, color: C.teal }}>{status}</span>}
+      </div>
+
+      {err && <div style={{ padding: "10px 13px", borderRadius: 8, border: `1px solid ${C.red}`, background: "rgba(220,80,80,.08)", color: C.red, fontSize: 12.5, marginBottom: 14 }}>{err}</div>}
+
+      {suggestions.length > 0 && (
+        <div style={{ marginBottom: 22 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 10 }}>
+            <span style={{ fontFamily: MONO, fontSize: 11, color: C.dim }}>{suggestions.length} suggestions · {checkedList.length} selected</span>
+            <button onClick={() => setChecked(Object.fromEntries(suggestions.map((s) => [s.name, true])))} style={{ background: "transparent", border: "none", cursor: "pointer", color: C.faint, fontFamily: MONO, fontSize: 10.5 }}>select all</button>
+            <button onClick={() => setChecked({})} style={{ background: "transparent", border: "none", cursor: "pointer", color: C.faint, fontFamily: MONO, fontSize: 10.5 }}>clear</button>
+            <button onClick={doAdd} disabled={adding || !checkedList.length} style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 7, padding: "10px 16px", borderRadius: 9, cursor: checkedList.length ? "pointer" : "default", border: `1px solid ${checkedList.length ? C.teal : C.line}`, background: C.panel, color: checkedList.length ? C.teal : C.faint, fontFamily: MONO, fontSize: 11 }}>{adding ? <Spin /> : <Plus size={13} />} CHECK ATS & ADD{checkedList.length ? " (" + checkedList.length + ")" : ""}</button>
+          </div>
+          <div style={{ display: "grid", gap: 7 }}>
+            {suggestions.map((s) => {
+              const on = !!checked[s.name];
+              return (
+                <button key={s.name} onClick={() => setChecked((c) => ({ ...c, [s.name]: !on }))} style={{ textAlign: "left", display: "flex", alignItems: "center", gap: 12, padding: "11px 13px", borderRadius: 9, cursor: "pointer", border: `1px solid ${on ? C.teal : C.line}`, background: on ? C.panel2 : C.panel, color: C.text }}>
+                  <span style={{ width: 18, height: 18, borderRadius: 5, border: `1px solid ${on ? C.teal : C.line}`, background: on ? C.teal : "transparent", display: "inline-flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>{on && <Check size={12} color="#fff" />}</span>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}><span style={{ fontWeight: 600, fontSize: 14, fontFamily: SERIF }}>{s.name}</span>{s.domain && <span style={{ fontFamily: MONO, fontSize: 10.5, color: C.faint }}>{s.domain}</span>}</div>
+                    {s.why && <div style={{ fontSize: 12, color: C.dim, marginTop: 2 }}>{s.why}</div>}
+                  </div>
+                  {s.category && <span style={{ fontFamily: MONO, fontSize: 9.5, letterSpacing: .4, color: C.violet, border: `1px solid ${C.line}`, borderRadius: 999, padding: "3px 9px", flexShrink: 0 }}>{s.category}</span>}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      <div>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+          <span style={{ fontFamily: MONO, fontSize: 11, letterSpacing: .5, color: C.dim }}>YOUR LIBRARY</span>
+          <span style={{ fontFamily: MONO, fontSize: 10.5, color: C.faint }}>{library.length} companies · <span style={{ color: screenable.length ? C.green : C.faint }}>{screenable.length} screenable free</span></span>
+          {screenable.length > 0 && <button onClick={goSonar} style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 6, background: "transparent", border: "none", cursor: "pointer", color: C.teal, fontFamily: MONO, fontSize: 10.5 }}><Radar size={12} /> pull these in Role Sonar</button>}
+        </div>
+        {!library.length ? (
+          <div style={{ padding: "18px 16px", border: `1px dashed ${C.line}`, borderRadius: 10, color: C.faint, fontSize: 12.5 }}>No companies yet. Add some above — the ones we can screen via their ATS will be pulled for free in Role Sonar (no TheirStack credits).</div>
+        ) : (
+          <div style={{ display: "grid", gap: 7 }}>
+            {library.map((c) => (
+              <div key={c.id} style={{ display: "flex", alignItems: "center", gap: 12, padding: "11px 13px", borderRadius: 9, border: `1px solid ${C.line}`, background: C.panel }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}><span style={{ fontWeight: 600, fontSize: 14, fontFamily: SERIF }}>{c.company}</span>{c.domain && <span style={{ fontFamily: MONO, fontSize: 10.5, color: C.faint }}>{c.domain}</span>}</div>
+                </div>
+                {c.screenable ? <span style={{ fontFamily: MONO, fontSize: 10, color: C.green, border: `1px solid ${C.green}`, borderRadius: 999, padding: "3px 10px" }}>ATS: {c.ats}{c.jobCount ? " · " + c.jobCount + " open" : ""}</span>
+                  : <span style={{ fontFamily: MONO, fontSize: 10, color: C.faint, border: `1px solid ${C.line}`, borderRadius: 999, padding: "3px 10px" }}>not auto-screenable</span>}
+                <button onClick={() => removeFromLibrary(c.id)} style={{ background: "transparent", border: "none", cursor: "pointer", color: C.faint, display: "inline-flex" }}><X size={15} /></button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- 04 · Role Sonar ---------------- */
 function Pill({ active, onClick, children, color = C.teal }) {
   return <button onClick={onClick} style={{ padding: "5px 10px", borderRadius: 7, cursor: "pointer", fontFamily: MONO, fontSize: 10.5, letterSpacing: .3, border: `1px solid ${active ? color : C.line}`, background: active ? C.panel2 : "transparent", color: active ? color : C.dim }}>{children}</button>;
 }
@@ -784,7 +940,7 @@ function Sonar({ found, ready, find, loading, pullLive, pulling, runRadar, radar
 
   return (
     <div>
-      <SectionTitle n="03" title="Role Sonar" desc="Found roles accumulate here over time — each scan adds new ones and never repeats what it already found. Map the ICP per role, then send the best to your Cockpit." />
+      <SectionTitle n="04" title="Role Sonar" desc="Found roles accumulate here over time — each scan adds new ones and never repeats what it already found. Map the ICP per role, then send the best to your Cockpit." />
       <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", marginBottom: 16 }}>
         <button onClick={runRadar} disabled={radaring || pulling || loading} className="cs-cta" style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "12px 20px", borderRadius: 10, fontFamily: MONO, fontSize: 12 }}>{radaring ? <Spin /> : <Radar size={14} />} {radaring ? "SCANNING MARKET…" : "RUN RADAR"}</button>
         {hasWatchlist && <button onClick={pullLive} disabled={pulling || radaring || loading} style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "12px 18px", borderRadius: 10, cursor: "pointer", border: `1px solid ${C.line}`, background: C.panel, color: C.dim, fontFamily: MONO, fontSize: 12 }}>{pulling ? <Spin /> : <Building2 size={14} />} {pulling ? "PULLING…" : "PULL WATCHLIST"}</button>}
@@ -893,7 +1049,7 @@ function Tracker({ targets, patch, unApply, remove, goCockpit }) {
   const stats = [["OPEN", targets.filter((t) => OPEN_STAGES.includes(t.stage)).length, C.teal], ["INTERVIEWING", targets.filter((t) => ["Interviewing", "Final round"].includes(t.stage)).length, C.amber], ["OFFERS", targets.filter((t) => t.stage === "Offer").length, C.green], ["CLOSED", targets.filter((t) => ["Rejected", "Withdrawn"].includes(t.stage)).length, C.faint]];
   return (
     <div>
-      <SectionTitle n="05" title="Application Tracker" desc="Applications you've sent — track each through to outcome." />
+      <SectionTitle n="06" title="Application Tracker" desc="Applications you've sent — track each through to outcome." />
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 20 }}>{stats.map(([label, n, col]) => <div key={label} style={{ flex: "1 1 120px", border: `1px solid ${C.line}`, borderRadius: 10, padding: "12px 14px", background: C.panel }}><div style={{ fontFamily: MONO, fontSize: 22, fontWeight: 700, color: col }}>{n}</div><div style={{ fontFamily: MONO, fontSize: 10, letterSpacing: .5, color: C.dim, marginTop: 2 }}>{label}</div></div>)}</div>
       <div style={{ display: "grid", gap: 10 }}>
         {sorted.map((t) => { const open = openId === t.id; const col = STAGE_COLOR[t.stage] || C.dim; const d = daysOpen(t.appliedAt); return (
@@ -920,7 +1076,7 @@ function SettingsTab({ settings, update, foundCount, clearHistory }) {
   const [confirm, setConfirm] = useState(false);
   return (
     <div style={{ maxWidth: 760 }}>
-      <SectionTitle n="06" title="Settings" desc="Tune how outreach is written, and how Role Sonar scans." />
+      <SectionTitle n="07" title="Settings" desc="Tune how outreach is written, and how Role Sonar scans." />
 
       <div style={{ border: `1px solid ${C.line}`, borderRadius: 10, padding: 16, marginBottom: 14, background: C.panel }}>
         <div style={{ fontFamily: MONO, fontSize: 12, letterSpacing: .5, marginBottom: 4 }}>OUTREACH MESSAGING</div>
