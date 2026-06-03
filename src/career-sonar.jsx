@@ -520,15 +520,18 @@ export default function App() {
         if (obj && Array.isArray(obj.companyPatterns)) patterns = obj.companyPatterns.map((s) => String(s).trim()).filter(Boolean).slice(0, 10);
       } catch (e) { /* keep raw titles, no patterns */ }
 
+      const REMOTE_MARKETS = new Set(["Remote EMEA", "Remote LATAM", "US Remote"]);
       const markets = (criteria.targetMarkets && criteria.targetMarkets.length) ? criteria.targetMarkets : ["Spain", "Remote EMEA"];
       const codes = Array.from(new Set(markets.flatMap((m) => MARKETS[m] || [])));
       const countries = codes.length ? codes : ["ES", "AE", "GB", "DE", "NL", "IE", "FR", "PT"];
+      const homeCountries = Array.from(new Set(markets.filter((m) => !REMOTE_MARKETS.has(m)).flatMap((m) => MARKETS[m] || [])));
+      const broadRemote = markets.some((m) => REMOTE_MARKETS.has(m));
 
       setScanStatus("scanning the market…");
       const res = await fetch("/api/radar", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ titles: useTitles, countries, descriptionPatterns: patterns, maxAgeDays: 30, limit: 25 }),
+        body: JSON.stringify({ titles: useTitles, countries, homeCountries, broadRemote, descriptionPatterns: patterns, maxAgeDays: 30, limit: 25 }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || ("Radar error " + res.status));
