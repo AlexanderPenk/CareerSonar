@@ -157,6 +157,16 @@ Add "posted": short freshness note if known (e.g. "2d","this week"), else "". Ke
 Respond with ONLY a compact minified JSON array — no markdown, no prose, no notes:
 [{"company":"","title":"","location":"","link":"","source":"","score":0,"posted":"","fit":"","signal":""}]`;
 
+const buildTitleExpansionPrompt = (criteria) => `You expand a job seeker's target titles into a focused set of search patterns for matching live job postings. Return ONLY a compact minified JSON array of strings.
+
+Target titles: ${criteria.titles || "n/a"}
+Seniority levels wanted: ${(criteria.seniorityLevels || []).join(", ") || criteria.seniority || "any"}
+Role type: ${criteria.roleType || "any"}
+
+Return 8-14 short job-title search patterns (2-4 words each): the given titles plus common synonyms and close variants at the wanted seniority. No duplicates. If role type is "Leadership / Manager" do NOT include junior or individual-contributor titles; if "Individual contributor" do NOT include manager/head/VP/C-level titles.
+
+Respond with ONLY a JSON array, e.g.: ["VP Sales","Vice President of Sales","Chief Revenue Officer","Head of Sales"]`;
+
 const buildScorePrompt = (profile, criteria, roles) => `You are scoring how well each job fits THIS candidate. Use only the information given; do NOT search. Return ONLY compact minified JSON.
 
 CANDIDATE
@@ -167,7 +177,9 @@ CANDIDATE
 
 CRITERIA
 - Target titles: ${criteria.titles || "n/a"}
-- Seniority: ${criteria.seniority || "n/a"}
+- Seniority levels wanted: ${(criteria.seniorityLevels || []).join(", ") || criteria.seniority || "n/a"}
+- Role type wanted: ${criteria.roleType || "n/a"}
+- Target markets: ${(criteria.targetMarkets || []).join(", ") || "n/a"}
 - Base & acceptable locations: ${criteria.locations || "n/a"}
 - Work mode: ${criteria.workMode || "Remote only"}
 - Industries: ${criteria.industries || "n/a"}
@@ -179,7 +191,7 @@ CRITERIA
 ROLES TO SCORE:
 ${roles.map((r) => `${r.n}. ${r.title} — ${r.company} (${r.location || "location n/a"})`).join("\n")}
 
-For each role return "n" (its number), "score" (integer 0-100 fit — weigh title & seniority match, work-location compatibility per the work mode, industry, wanted role characteristics, and similarity to the reference companies; calibrate honestly: 85-100 excellent, 65-84 good, 40-64 partial, below 40 weak; do not inflate), "fit" (under 10 words on why), "signal" (under 6 words). Score ONLY the roles listed; never invent roles.
+For each role return "n" (its number), "score" (integer 0-100 fit — weigh title & seniority match, whether it matches the wanted role type (leadership vs IC), target-market/work-location compatibility, industry, wanted role characteristics, and similarity to the reference companies; calibrate honestly: 85-100 excellent, 65-84 good, 40-64 partial, below 40 weak; do not inflate), "fit" (under 10 words on why), "signal" (under 6 words). Score ONLY the roles listed; never invent roles.
 
 Respond with ONLY a compact minified JSON array: [{"n":1,"score":0,"fit":"","signal":""}]`;
 
@@ -251,8 +263,27 @@ Respond with ONLY this JSON, no prose:
 {"status":"open","confidence":"high|medium|low","note":"one short sentence","url":"best current url or empty"}`;
 
 const EMPTY_PROFILE = { headline: "", skills: [], evidence: "", positioning: "" };
-const EMPTY_CRITERIA = { titles: "", roleCharacteristics: [], exampleCompanies: [], workMode: "Remote only", seniority: "", locations: "", industries: "", mustHaves: "", comp: "", bias: "" };
+const EMPTY_CRITERIA = { titles: "", roleCharacteristics: [], exampleCompanies: [], workMode: "Remote only", seniority: "", seniorityLevels: [], roleType: "", targetMarkets: ["Spain", "Remote EMEA"], locations: "", industries: "", mustHaves: "", comp: "", bias: "" };
 const WORKMODES = ["Remote only", "Hybrid in my city OK", "In office", "Open to relocation", "Open to any setup"];
+const SENIORITY = ["C-Level", "VP", "Director", "Head of", "Senior Manager", "Manager", "Senior IC", "IC"];
+const ROLETYPES = ["Leadership / Manager", "Individual contributor", "Either"];
+// market label -> ISO country codes the radar searches
+const MARKETS = {
+  "Spain": ["ES"],
+  "Remote EMEA": ["GB", "IE", "DE", "NL", "FR", "ES", "PT", "IT", "SE", "DK", "PL", "CH", "AT", "BE", "FI", "NO"],
+  "Germany / DACH": ["DE", "AT", "CH"],
+  "UK & Ireland": ["GB", "IE"],
+  "Benelux": ["NL", "BE", "LU"],
+  "France": ["FR"],
+  "Nordics": ["SE", "DK", "NO", "FI"],
+  "Italy": ["IT"],
+  "Portugal": ["PT"],
+  "UAE / Dubai": ["AE"],
+  "Saudi / Gulf": ["SA", "QA", "KW", "BH", "OM"],
+  "Mexico": ["MX"],
+  "Remote LATAM": ["MX", "BR", "AR", "CO", "CL"],
+  "US Remote": ["US"],
+};
 const EMPTY_SETTINGS = { breadth: 8, autoScan: false, verifyOnScan: true, lastScan: 0, msgTone: "Warm & direct", msgLength: "Standard", msgMetrics: false, msgLang: "Auto", msgSign: "", msgGuidance: "" };
 const TONES = ["Warm & direct", "Formal & precise", "Casual & punchy", "Consultative"];
 const LENGTHS = ["Concise", "Standard", "Detailed"];
@@ -386,11 +417,21 @@ export default function App() {
   }
 
   async function runRadar() {
-    setErr(""); setRadaring(true); setScanStatus("scanning the market…");
+    setErr(""); setRadaring(true); setScanStatus("expanding titles…");
     try {
-      const titles = (criteria.titles || "").split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
-      const useTitles = titles.length ? titles : ["VP Sales", "Head of Sales", "Chief Revenue Officer", "Sales Director", "Country Manager"];
-      const countries = ["ES", "AE", "GB", "DE", "NL", "IE", "FR", "PT"];
+      const rawTitles = (criteria.titles || "").split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
+      let useTitles = rawTitles.length ? rawTitles : ["VP Sales", "Head of Sales", "Chief Revenue Officer", "Sales Director", "Country Manager"];
+      // expand to similar titles via the LLM (best-effort; falls back to raw titles)
+      try {
+        const arr = extractJSON(await callClaude(buildTitleExpansionPrompt(criteria), false));
+        if (Array.isArray(arr) && arr.length) useTitles = Array.from(new Set(arr.map((s) => String(s).trim()).filter(Boolean))).slice(0, 14);
+      } catch (e) { /* keep raw titles */ }
+
+      const markets = (criteria.targetMarkets && criteria.targetMarkets.length) ? criteria.targetMarkets : ["Spain", "Remote EMEA"];
+      const codes = Array.from(new Set(markets.flatMap((m) => MARKETS[m] || [])));
+      const countries = codes.length ? codes : ["ES", "AE", "GB", "DE", "NL", "IE", "FR", "PT"];
+
+      setScanStatus("scanning the market…");
       const res = await fetch("/api/radar", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -629,24 +670,37 @@ Use "" for anything unknown. Keep "evidence" under ~80 words.`;
 /* ---------------- 02 · Search Criteria ---------------- */
 function Criteria({ criteria, setCriteria, save, saved, ready, watchlist, saveWatchlist, runSonar }) {
   const up = (k) => (v) => setCriteria({ ...criteria, [k]: v });
-  const [wSrc, setWSrc] = useState("greenhouse");
-  const [wTok, setWTok] = useState("");
-  const [wName, setWName] = useState("");
-  const addCompany = () => {
-    const tok = wTok.trim(); if (!tok) return;
-    saveWatchlist([...(watchlist || []), { id: Date.now() + "", source: wSrc, token: tok, name: (wName.trim() || tok) }]);
-    setWTok(""); setWName("");
-  };
+  const toggleArr = (k, v) => { const cur = criteria[k] || []; setCriteria({ ...criteria, [k]: cur.includes(v) ? cur.filter((x) => x !== v) : [...cur, v] }); };
   return (
     <div style={{ maxWidth: 860 }}>
       <SectionTitle n="02" title="Role Search Criteria" desc="What you want — the demand side. This is the filter Role Sonar uses to find and rank openings." />
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 22px" }}>
-        <Field label="Target titles" hint="comma separated" value={criteria.titles} onChange={up("titles")} ph="VP Sales, CSO, Head of Revenue" />
-        <Field label="Seniority" value={criteria.seniority} onChange={up("seniority")} ph="VP / C-level" />
+        <Field label="Target titles" hint="comma separated · the radar also searches similar titles" value={criteria.titles} onChange={up("titles")} ph="VP Sales, CSO, Head of Revenue" />
         <Field label="Where you're based" hint="your home base + regions you'll work from" value={criteria.locations} onChange={up("locations")} ph="Madrid, Spain · open to remote-EU / DACH" />
         <Field label="Industries" value={criteria.industries} onChange={up("industries")} ph="B2B SaaS, AI, fintech" />
         <Field label="Must-haves" value={criteria.mustHaves} onChange={up("mustHaves")} ph="Series B+, equity, English-first" />
         <Field label="Comp expectation" hint="optional" value={criteria.comp} onChange={up("comp")} ph="€180k+ OTE" />
+      </div>
+      <div style={{ marginBottom: 16 }}>
+        <label style={{ fontFamily: MONO, fontSize: 11, letterSpacing: .5, color: C.dim, display: "block", marginBottom: 7 }}>Target markets <span style={{ color: C.faint }}>— where the radar searches</span></label>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+          {(criteria.targetMarkets || []).length === 0 && <span style={{ fontSize: 12.5, color: C.faint }}>none yet — add a market →</span>}
+          {(criteria.targetMarkets || []).map((m) => (
+            <span key={m} style={{ display: "inline-flex", alignItems: "center", gap: 6, fontFamily: MONO, fontSize: 11, fontWeight: 700, color: "#fff", background: C.teal, borderRadius: 999, padding: "5px 10px" }}>{m}<X size={12} onClick={() => toggleArr("targetMarkets", m)} style={{ cursor: "pointer", opacity: .85 }} /></span>
+          ))}
+          <select value="" onChange={(e) => { if (e.target.value) toggleArr("targetMarkets", e.target.value); }} style={{ padding: "7px 11px", borderRadius: 999, border: `1px dashed ${C.line}`, background: C.panel, color: C.dim, fontFamily: MONO, fontSize: 11, cursor: "pointer" }}>
+            <option value="">+ add market</option>
+            {Object.keys(MARKETS).filter((m) => !(criteria.targetMarkets || []).includes(m)).map((m) => <option key={m} value={m}>{m}</option>)}
+          </select>
+        </div>
+      </div>
+      <div style={{ marginBottom: 16 }}>
+        <label style={{ fontFamily: MONO, fontSize: 11, letterSpacing: .5, color: C.dim, display: "block", marginBottom: 7 }}>Seniority levels <span style={{ color: C.faint }}>— pick all that fit</span></label>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>{SENIORITY.map((m) => <Pill key={m} active={(criteria.seniorityLevels || []).includes(m)} onClick={() => toggleArr("seniorityLevels", m)} color={C.violet}>{m}</Pill>)}</div>
+      </div>
+      <div style={{ marginBottom: 16 }}>
+        <label style={{ fontFamily: MONO, fontSize: 11, letterSpacing: .5, color: C.dim, display: "block", marginBottom: 7 }}>Role type <span style={{ color: C.faint }}>— what you're going for</span></label>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>{ROLETYPES.map((m) => <Pill key={m} active={criteria.roleType === m} onClick={() => up("roleType")(m)} color={C.amber}>{m}</Pill>)}</div>
       </div>
       <div style={{ marginBottom: 16 }}>
         <label style={{ fontFamily: MONO, fontSize: 11, letterSpacing: .5, color: C.dim, display: "block", marginBottom: 7 }}>Work mode <span style={{ color: C.faint }}>— a hard filter on where you must physically be</span></label>
@@ -655,33 +709,7 @@ function Criteria({ criteria, setCriteria, save, saved, ready, watchlist, saveWa
       <ChipInput label="Role characteristics" hint="what the role should involve — type and press Enter" items={criteria.roleCharacteristics} setItems={up("roleCharacteristics")} ph="e.g. Building a team, Managing a team, Owning revenue, Hands-on sales" color={C.amber} />
       <ChipInput label="Reference companies" hint="5-10 that capture the fit you want (industry, product, size) — for calibration, not a filter" items={criteria.exampleCompanies} setItems={up("exampleCompanies")} ph="e.g. Personio, Celonis, DeepL, Pigment, Cohere" color={C.violet} />
       <Field label="Extra search bias" hint="free text to steer the scan" area value={criteria.bias} onChange={up("bias")} ph="AI-native companies, founder-led, avoid agencies / consultancies" />
-      <div style={{ marginBottom: 18, border: `1px solid ${C.line}`, borderRadius: 10, padding: 16, background: C.panel2 }}>
-        <label style={{ fontFamily: MONO, fontSize: 11, letterSpacing: .5, color: C.text, display: "block", marginBottom: 4, fontWeight: 700 }}>Target companies — live job feeds</label>
-        <p style={{ margin: "0 0 12px", color: C.dim, fontSize: 12, lineHeight: 1.5 }}>Role Sonar pulls <b>real, currently-open</b> roles directly from these companies' application systems. Find the token in a company's careers URL: boards.greenhouse.io/<b>token</b> · jobs.lever.co/<b>token</b> · jobs.ashbyhq.com/<b>token</b>.</p>
-        {(watchlist || []).map((c) => (
-          <div key={c.id} style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 6, flexWrap: "wrap" }}>
-            <span style={{ fontFamily: MONO, fontSize: 10, fontWeight: 700, color: "#fff", background: C.teal, borderRadius: 6, padding: "3px 8px" }}>{c.source}</span>
-            <span style={{ fontFamily: MONO, fontSize: 11, color: C.dim }}>{c.token}</span>
-            <span style={{ fontSize: 12.5, color: C.text, fontWeight: 600 }}>{c.name}</span>
-            <button onClick={() => saveWatchlist(watchlist.filter((x) => x.id !== c.id))} style={{ marginLeft: "auto", background: "transparent", border: "none", cursor: "pointer", color: C.faint, fontFamily: MONO, fontSize: 10.5 }}>remove</button>
-          </div>
-        ))}
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10, alignItems: "center" }}>
-          <select value={wSrc} onChange={(e) => setWSrc(e.target.value)} style={{ padding: "9px 10px", borderRadius: 8, border: `1px solid ${C.line}`, background: C.panel, color: C.text, fontFamily: MONO, fontSize: 11.5 }}>
-            <option value="greenhouse">greenhouse</option>
-            <option value="lever">lever</option>
-            <option value="ashby">ashby</option>
-            <option value="smartrecruiters">smartrecruiters</option>
-            <option value="workable">workable</option>
-            <option value="recruitee">recruitee</option>
-            <option value="personio">personio</option>
-            <option value="workday">workday</option>
-          </select>
-          <input value={wTok} onChange={(e) => setWTok(e.target.value)} placeholder={wSrc === "workday" ? "full myworkdayjobs.com URL" : "token (e.g. datsolutions)"} style={{ flex: "1 1 180px", padding: "9px 11px", borderRadius: 8, border: `1px solid ${C.line}`, background: C.panel, color: C.text, fontFamily: MONO, fontSize: 12 }} />
-          <input value={wName} onChange={(e) => setWName(e.target.value)} placeholder="company name (optional)" style={{ flex: "1 1 160px", padding: "9px 11px", borderRadius: 8, border: `1px solid ${C.line}`, background: C.panel, color: C.text, fontSize: 13 }} />
-          <button onClick={addCompany} style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "9px 14px", borderRadius: 8, cursor: "pointer", border: `1px solid ${C.teal}`, background: C.panel, color: C.teal, fontFamily: MONO, fontSize: 11, fontWeight: 700 }}><Plus size={13} /> ADD</button>
-        </div>
-      </div>
+
       <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
         <SaveBtn onClick={save} saved={saved} label="SAVE CRITERIA" />
         <button onClick={runSonar} disabled={!ready} className="cs-cta" style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "12px 20px", borderRadius: 10, fontFamily: MONO, fontSize: 12 }}><Search size={14} /> RUN ROLE SONAR</button>
@@ -728,10 +756,10 @@ function Sonar({ found, ready, find, loading, pullLive, pulling, runRadar, radar
       <SectionTitle n="03" title="Role Sonar" desc="Found roles accumulate here over time — each scan adds new ones and never repeats what it already found. Map the ICP per role, then send the best to your Cockpit." />
       <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", marginBottom: 16 }}>
         <button onClick={runRadar} disabled={radaring || pulling || loading} className="cs-cta" style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "12px 20px", borderRadius: 10, fontFamily: MONO, fontSize: 12 }}>{radaring ? <Spin /> : <Radar size={14} />} {radaring ? "SCANNING MARKET…" : "RUN RADAR"}</button>
-        <button onClick={pullLive} disabled={pulling || radaring || loading} style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "12px 18px", borderRadius: 10, cursor: "pointer", border: `1px solid ${C.line}`, background: C.panel, color: C.dim, fontFamily: MONO, fontSize: 12 }}>{pulling ? <Spin /> : <Building2 size={14} />} {pulling ? "PULLING…" : "PULL WATCHLIST"}</button>
+        {hasWatchlist && <button onClick={pullLive} disabled={pulling || radaring || loading} style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "12px 18px", borderRadius: 10, cursor: "pointer", border: `1px solid ${C.line}`, background: C.panel, color: C.dim, fontFamily: MONO, fontSize: 12 }}>{pulling ? <Spin /> : <Building2 size={14} />} {pulling ? "PULLING…" : "PULL WATCHLIST"}</button>}
         <button onClick={find} disabled={loading || pulling} style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "12px 18px", borderRadius: 10, cursor: "pointer", border: `1px solid ${C.line}`, background: C.panel, color: C.dim, fontFamily: MONO, fontSize: 12 }}>{loading ? <Spin /> : <Search size={14} />} {loading ? "AI SCAN… ~20–40s" : "AI WEB SCAN"}</button>
         <button onClick={scoreRoles} disabled={scoring || !unscored} style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "12px 18px", borderRadius: 10, cursor: unscored ? "pointer" : "default", border: `1px solid ${unscored ? C.teal : C.line}`, background: C.panel, color: unscored ? C.teal : C.faint, fontFamily: MONO, fontSize: 12 }}>{scoring ? <Spin /> : <Sparkles size={14} />} {scoring ? "SCORING…" : `SCORE${unscored ? " (" + unscored + ")" : ""}`}</button>
-        <span style={{ fontFamily: MONO, fontSize: 10.5, color: C.dim }}>{(loading || pulling || scoring) && scanStatus ? <span style={{ color: C.teal }}>{scanStatus}</span> : <>last scan: {lastScan ? agoLabel(lastScan) : "never"}{lastFresh != null && <span style={{ color: lastFresh ? C.teal : C.faint }}> · +{lastFresh} new</span>}{!hasWatchlist && <span style={{ color: C.faint }}> · add target companies in Search Criteria to pull live roles</span>}</>}</span>
+        <span style={{ fontFamily: MONO, fontSize: 10.5, color: C.dim }}>{(loading || pulling || scoring) && scanStatus ? <span style={{ color: C.teal }}>{scanStatus}</span> : <>last scan: {lastScan ? agoLabel(lastScan) : "never"}{lastFresh != null && <span style={{ color: lastFresh ? C.teal : C.faint }}> · +{lastFresh} new</span>}</>}</span>
         <button onClick={goSettings} style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 6, background: "transparent", border: "none", cursor: "pointer", color: C.faint, fontFamily: MONO, fontSize: 10.5 }}><Cog size={12} /> scan settings</button>
       </div>
 
