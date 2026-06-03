@@ -10,19 +10,27 @@
 
 const clean = (s) => (s == null ? "" : String(s)).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
 
-const NAME2CODE = { "united states": "US", "usa": "US", "u.s.": "US", "united kingdom": "GB", "u.k.": "GB", "england": "GB", "germany": "DE", "deutschland": "DE", "spain": "ES", "españa": "ES", "france": "FR", "netherlands": "NL", "ireland": "IE", "portugal": "PT", "italy": "IT", "sweden": "SE", "denmark": "DK", "norway": "NO", "finland": "FI", "poland": "PL", "switzerland": "CH", "austria": "AT", "belgium": "BE", "luxembourg": "LU", "canada": "CA", "india": "IN", "australia": "AU", "singapore": "SG", "mexico": "MX", "brazil": "BR", "argentina": "AR", "colombia": "CO", "chile": "CL", "united arab emirates": "AE", "uae": "AE", "dubai": "AE", "saudi arabia": "SA", "qatar": "QA", "kuwait": "KW", "bahrain": "BH", "oman": "OM" };
+const NAME2CODE = { "united states": "US", "usa": "US", "u.s.": "US", "united kingdom": "GB", "u.k.": "GB", "uk": "GB", "england": "GB", "germany": "DE", "deutschland": "DE", "spain": "ES", "españa": "ES", "france": "FR", "netherlands": "NL", "ireland": "IE", "portugal": "PT", "italy": "IT", "sweden": "SE", "denmark": "DK", "norway": "NO", "finland": "FI", "poland": "PL", "switzerland": "CH", "austria": "AT", "belgium": "BE", "luxembourg": "LU", "canada": "CA", "india": "IN", "australia": "AU", "singapore": "SG", "mexico": "MX", "brazil": "BR", "argentina": "AR", "colombia": "CO", "chile": "CL", "united arab emirates": "AE", "uae": "AE", "dubai": "AE", "saudi arabia": "SA", "qatar": "QA", "kuwait": "KW", "bahrain": "BH", "oman": "OM" };
+
+// Major cities -> country, so a role anchored to a single foreign city ("London Area",
+// "Greater Paris", "Hamburg") is recognized as country-locked even without the country name.
+const CITY2CODE = { "madrid": "ES", "barcelona": "ES", "valencia": "ES", "sevilla": "ES", "seville": "ES", "malaga": "ES", "bilbao": "ES", "london": "GB", "manchester": "GB", "birmingham": "GB", "edinburgh": "GB", "dublin": "IE", "paris": "FR", "lyon": "FR", "toulouse": "FR", "berlin": "DE", "munich": "DE", "münchen": "DE", "munchen": "DE", "hamburg": "DE", "frankfurt": "DE", "cologne": "DE", "köln": "DE", "koln": "DE", "stuttgart": "DE", "düsseldorf": "DE", "dusseldorf": "DE", "amsterdam": "NL", "rotterdam": "NL", "utrecht": "NL", "vienna": "AT", "wien": "AT", "zurich": "CH", "zürich": "CH", "geneva": "CH", "milan": "IT", "milano": "IT", "rome": "IT", "roma": "IT", "lisbon": "PT", "lisboa": "PT", "porto": "PT", "stockholm": "SE", "copenhagen": "DK", "oslo": "NO", "helsinki": "FI", "brussels": "BE", "warsaw": "PL", "abu dhabi": "AE", "riyadh": "SA", "new york": "US", "san francisco": "US", "austin": "US", "boston": "US", "chicago": "US", "seattle": "US", "los angeles": "US", "atlanta": "US", "denver": "US", "mexico city": "MX", "toronto": "CA", "bangalore": "IN", "bengaluru": "IN", "mumbai": "IN" };
 
 // ISO2 codes inferred from the job's DISPLAYED location text (what the user sees).
-// We intentionally use the shown location, not the full multi-location list, so a
-// US-headquartered "global remote" posting that merely lists Spain doesn't slip in.
 function jobCodes(j) {
   const s = new Set();
   const locStr = String(j.location || j.long_location || j.short_location || j.country || "").toLowerCase();
   for (const name in NAME2CODE) { if (locStr.indexOf(name) !== -1) s.add(NAME2CODE[name]); }
+  for (const city in CITY2CODE) { if (locStr.indexOf(city) !== -1) s.add(CITY2CODE[city]); }
   return s;
 }
 
-async function runSearch({ key, titles, countries, patterns, maxAge, limit }) {
+// A role open across a region / borderless, i.e. plausibly workable from the user's base.
+function isBroadRemote(locStr) {
+  return /\b(emea|europe|european|eu wide|eu-wide|eea|pan[- ]?europe|global|worldwide|world wide|anywhere|international|remote first|remote-first)\b/i.test(locStr);
+}
+
+async function runSearch({ key, titles, countries, homeCountries, broadRemote, patterns, maxAge, limit }) {
   const payload = {
     posted_at_max_age_days: maxAge > 0 ? maxAge : 30,
     order_by: [{ field: "date_posted", desc: true }],
@@ -48,16 +56,20 @@ async function runSearch({ key, titles, countries, patterns, maxAge, limit }) {
   }
 
   const rows = Array.isArray(data.data) ? data.data : Array.isArray(data.results) ? data.results : Array.isArray(data.jobs) ? data.jobs : [];
-  // Filter by the DISPLAYED location: if the shown location names a country and none of
-  // those countries are in the selected markets, drop it (e.g. a US-HQ "global remote" role
-  // shown as "AMER - California"). City-only, pure-remote, or region-only ("EMEA …") stay.
-  const reqSet = new Set((countries || []).map((c) => String(c).toUpperCase()));
+  // Keep a role only if it's workable from the user's base:
+  //  - located in one of their home/place countries (e.g. Spain), OR
+  //  - a genuinely borderless / region-wide remote role (when a remote market is selected), OR
+  //  - location is ambiguous (city we don't map / pure "Remote").
+  // Drop roles anchored to a single OTHER country (e.g. "Germany · Remote", "London Area").
+  const homeSet = new Set((homeCountries || countries || []).map((c) => String(c).toUpperCase()));
   const inMarket = rows.filter((j) => {
-    if (!reqSet.size) return true;
+    if (!homeSet.size && !broadRemote) return true;
+    const locStr = String(j.location || j.long_location || j.short_location || "").toLowerCase();
     const codes = jobCodes(j);
-    if (!codes.size) return true;
-    for (const c of codes) if (reqSet.has(c)) return true;
-    return false;
+    if (!codes.size) return true;                                   // ambiguous -> keep
+    for (const c of codes) if (homeSet.has(c)) return true;         // in a home country
+    if (broadRemote && (isBroadRemote(locStr) || codes.size >= 2)) return true; // region-wide remote
+    return false;                                                   // locked to another single country
   });
   const tidy = (s) => clean(String(s).replace(/\{+\s*remote\s*\}+/gi, "Remote").replace(/,?\s*United States of America/gi, ", USA")).replace(/(,\s*)+/g, ", ").replace(/^,\s*|,\s*$/g, "");
   const jobs = inMarket.map((j) => {
@@ -88,9 +100,9 @@ export default async function handler(req, res) {
       const patterns = q.pattern ? [].concat(q.pattern) : [];
       const maxAge = Number(q.days) || 30;
       const limit = Math.min(Number(q.limit) || 5, 25);
-      if (!titles.length && !countries.length) { res.status(200).json({ ok: true, v: 5, hint: "test with ?title=Head of Sales&country=ES&days=30&limit=5" }); return; }
+      if (!titles.length && !countries.length) { res.status(200).json({ ok: true, v: 6, hint: "test with ?title=Head of Sales&country=ES&days=30&limit=5" }); return; }
       const out = await runSearch({ key, titles, countries, patterns, maxAge, limit });
-      res.status(200).json({ v: 5, count: out.jobs.length, total: out.total, returned: out.returned, jobs: out.jobs, _debug: out._debug });
+      res.status(200).json({ v: 6, count: out.jobs.length, total: out.total, returned: out.returned, jobs: out.jobs, _debug: out._debug });
       return;
     }
 
@@ -99,8 +111,10 @@ export default async function handler(req, res) {
       const titles = Array.isArray(body.titles) ? body.titles.filter(Boolean) : [];
       const countries = Array.isArray(body.countries) ? body.countries.filter(Boolean) : [];
       const patterns = Array.isArray(body.descriptionPatterns) ? body.descriptionPatterns.filter(Boolean) : [];
-      const out = await runSearch({ key, titles, countries, patterns, maxAge: Number(body.maxAgeDays) || 30, limit: Number(body.limit) || 25 });
-      res.status(200).json({ v: 5, count: out.jobs.length, total: out.total, returned: out.returned, jobs: out.jobs });
+      const homeCountries = Array.isArray(body.homeCountries) ? body.homeCountries.filter(Boolean) : [];
+      const broadRemote = !!body.broadRemote;
+      const out = await runSearch({ key, titles, countries, homeCountries, broadRemote, patterns, maxAge: Number(body.maxAgeDays) || 30, limit: Number(body.limit) || 25 });
+      res.status(200).json({ v: 6, count: out.jobs.length, total: out.total, returned: out.returned, jobs: out.jobs });
       return;
     }
 
