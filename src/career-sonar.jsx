@@ -313,6 +313,7 @@ STYLE:
 - ${lang}
 ${s.msgSign ? `- Sign off as: ${s.msgSign}.` : ""}
 ${s.msgGuidance ? `- Extra guidance: ${s.msgGuidance}` : ""}
+${s.msgExample ? `\nSTYLE REFERENCE — the candidate wrote the message below. Mirror its VOICE: sentence length and rhythm, level of formality, greeting and sign-off habits, and any personal phrasing or quirks. Match HOW they write, not WHAT they wrote — never reuse its specific facts, names or content:\n"""\n${s.msgExample}\n"""` : ""}
 
 Distinct messages per stakeholder:
 - hiring_manager: a LinkedIn note only (MAX 280 chars), business-case framing — no email.
@@ -360,7 +361,7 @@ const MARKETS = {
   "Remote LATAM": ["MX", "BR", "AR", "CO", "CL"],
   "US Remote": ["US"],
 };
-const EMPTY_SETTINGS = { breadth: 8, autoScan: false, verifyOnScan: true, lastScan: 0, msgTone: "Warm & direct", msgLength: "Standard", msgMetrics: false, msgLang: "Auto", msgSign: "", msgGuidance: "" };
+const EMPTY_SETTINGS = { breadth: 8, autoScan: false, verifyOnScan: true, lastScan: 0, msgTone: "Warm & direct", msgLength: "Standard", msgMetrics: false, msgLang: "Auto", msgSign: "", msgGuidance: "", msgExample: "" };
 const TONES = ["Warm & direct", "Formal & precise", "Casual & punchy", "Consultative"];
 const LENGTHS = ["Concise", "Standard", "Detailed"];
 const LANGS = ["Auto", "English", "German"];
@@ -1175,7 +1176,7 @@ function Tracker({ targets, patch, unApply, remove, goCockpit }) {
                 <button onClick={() => setOpenId(open ? null : t.id)} title="next step & details" style={{ background: "transparent", border: `1px solid ${C.line}`, borderRadius: 7, cursor: "pointer", color: C.dim, padding: 7, display: "flex" }}>{open ? <ChevronDown size={15} /> : <ChevronRight size={15} />}</button>
               </div>
             </div>
-            {open && <div style={{ borderTop: `1px solid ${C.line}`, padding: 14 }}><Field label="Next step / notes" value={t.note || ""} onChange={(v) => patch(t.id, { note: v })} ph="e.g. follow up with recruiter Fri · intro call booked 12 Jun" />{t.drafts && <div style={{ marginTop: 4 }}><Drafts target={t} patch={patch} /></div>}<div style={{ display: "flex", gap: 10, marginTop: 14, flexWrap: "wrap" }}><button onClick={() => unApply(t.id)} style={{ ...ghostBtn }}><Undo2 size={13} /> RETURN TO COCKPIT</button><button onClick={() => remove(t.id)} style={{ ...ghostBtn, border: `1px solid ${C.line}`, color: C.dim }}><Trash2 size={13} /> REMOVE</button></div></div>}
+            {open && <div style={{ borderTop: `1px solid ${C.line}`, padding: 14 }}>{t.research && Array.isArray(t.research.personas) && t.research.personas.length > 0 ? <div style={{ marginBottom: 14 }}><PersonaList personas={t.research.personas} company={t.company} /></div> : <div style={{ fontFamily: MONO, fontSize: 10.5, color: C.faint, marginBottom: 14, lineHeight: 1.5 }}>No key stakeholders mapped yet — open this role in the Cockpit and run “Map Key Stakeholders” to pull names &amp; LinkedIn links here.</div>}<Field label="Next step / notes" value={t.note || ""} onChange={(v) => patch(t.id, { note: v })} ph="e.g. follow up with recruiter Fri · intro call booked 12 Jun" />{t.drafts && <div style={{ marginTop: 4 }}><Drafts target={t} patch={patch} /></div>}<div style={{ display: "flex", gap: 10, marginTop: 14, flexWrap: "wrap" }}><button onClick={() => unApply(t.id)} style={{ ...ghostBtn }}><Undo2 size={13} /> RETURN TO COCKPIT</button><button onClick={() => remove(t.id)} style={{ ...ghostBtn, border: `1px solid ${C.line}`, color: C.dim }}><Trash2 size={13} /> REMOVE</button></div></div>}
           </div>); })}
       </div>
     </div>
@@ -1209,6 +1210,7 @@ function SettingsTab({ settings, update, foundCount, clearHistory }) {
 
         <Field label="Sign-off name" hint="optional — how to sign your messages" value={settings.msgSign || ""} onChange={(v) => update({ msgSign: v })} ph="e.g. Alex" />
         <Field label="Extra guidance" hint="optional — anything the AI should always keep in mind" area value={settings.msgGuidance || ""} onChange={(v) => update({ msgGuidance: v })} ph="e.g. mention I'm open to relocating · keep it understated · no flattery" />
+        <Field label="Example message (your style)" hint="optional — paste a short message you've written. The AI mirrors your voice, not the content." area value={settings.msgExample || ""} onChange={(v) => update({ msgExample: v })} ph="Paste a LinkedIn note or email you wrote yourself — tone, phrasing and sign-off will be matched." />
       </div>
 
       <div style={{ border: `1px solid ${C.line}`, borderRadius: 10, padding: 16, marginBottom: 14, background: C.panel }}>
