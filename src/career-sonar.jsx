@@ -120,6 +120,21 @@ function fileToBase64(file) {
   return new Promise((resolve, reject) => { const r = new FileReader(); r.onload = () => resolve(String(r.result).split(",")[1]); r.onerror = () => reject(new Error("Could not read file")); r.readAsDataURL(file); });
 }
 const toArr = (s) => Array.isArray(s) ? s : (typeof s === "string" ? s.split(/[,;]/).map((x) => x.trim()).filter(Boolean) : []);
+
+// Client-side "workable from your base" location filter, mirroring api/radar.js, used for ATS pulls.
+const _N2C = { "united states": "US", "usa": "US", "u.s.": "US", "united kingdom": "GB", "u.k.": "GB", "uk": "GB", "england": "GB", "germany": "DE", "deutschland": "DE", "spain": "ES", "españa": "ES", "france": "FR", "netherlands": "NL", "ireland": "IE", "portugal": "PT", "italy": "IT", "sweden": "SE", "denmark": "DK", "norway": "NO", "finland": "FI", "poland": "PL", "switzerland": "CH", "austria": "AT", "belgium": "BE", "canada": "CA", "india": "IN", "australia": "AU", "singapore": "SG", "mexico": "MX", "brazil": "BR", "united arab emirates": "AE", "uae": "AE", "dubai": "AE", "saudi arabia": "SA", "qatar": "QA" };
+const _C2C = { "madrid": "ES", "barcelona": "ES", "valencia": "ES", "sevilla": "ES", "malaga": "ES", "bilbao": "ES", "london": "GB", "manchester": "GB", "dublin": "IE", "paris": "FR", "lyon": "FR", "berlin": "DE", "munich": "DE", "münchen": "DE", "hamburg": "DE", "frankfurt": "DE", "cologne": "DE", "köln": "DE", "stuttgart": "DE", "amsterdam": "NL", "rotterdam": "NL", "vienna": "AT", "wien": "AT", "zurich": "CH", "zürich": "CH", "milan": "IT", "milano": "IT", "rome": "IT", "lisbon": "PT", "porto": "PT", "stockholm": "SE", "copenhagen": "DK", "oslo": "NO", "helsinki": "FI", "brussels": "BE", "warsaw": "PL", "abu dhabi": "AE", "new york": "US", "san francisco": "US", "austin": "US", "boston": "US", "chicago": "US", "seattle": "US", "los angeles": "US", "mexico city": "MX", "toronto": "CA", "bangalore": "IN", "mumbai": "IN" };
+function _jobCodes(loc) { const s = new Set(); const t = String(loc || "").toLowerCase(); for (const n in _N2C) if (t.indexOf(n) !== -1) s.add(_N2C[n]); for (const c in _C2C) if (t.indexOf(c) !== -1) s.add(_C2C[c]); return s; }
+function _isBroad(t) { return /\b(emea|europe|european|eea|pan[- ]?europe|global|worldwide|anywhere|international|remote first|remote-first)\b/i.test(String(t || "")); }
+function inRadius(loc, homeCountries, broadRemote) {
+  const home = new Set((homeCountries || []).map((c) => String(c).toUpperCase()));
+  if (!home.size && !broadRemote) return true;
+  const codes = _jobCodes(loc);
+  if (!codes.size) return true;
+  for (const c of codes) if (home.has(c)) return true;
+  if (broadRemote && (_isBroad(loc) || codes.size >= 2)) return true;
+  return false;
+}
 const daysOpen = (ts) => ts ? Math.max(0, Math.floor((Date.now() - ts) / 86400000)) : 0;
 const agoLabel = (ts) => { const d = daysOpen(ts); return d === 0 ? "today" : d + "d ago"; };
 const fmtDate = (ts) => ts ? new Date(ts).toLocaleDateString(undefined, { day: "2-digit", month: "short" }) : "";
@@ -184,9 +199,9 @@ Preferences / bias: ${criteria.bias || "n/a"}
 Target markets: ${(criteria.targetMarkets || []).join(", ") || "n/a"}
 
 Return 30-40 REAL companies similar to the seeds (same kind of product, business model and stage) that plausibly hire for the role focus. Prefer companies that operate or hire in the target markets. Do NOT repeat the seed companies. Only include companies you are confident actually exist.
-For each company: {"name","domain","why","category"} — domain is the primary website domain (e.g. "personio.com"), why is under 8 words, category is a 1-3 word type tag.
+For each company: {"name","domain","why","category"} — domain is the primary website domain (e.g. "personio.com"), why is a plain-language description of WHAT THE COMPANY DOES and who for (10-16 words, so the user instantly recognizes unfamiliar names), category is a 1-3 word type tag.
 
-Respond with ONLY: [{"name":"Celonis","domain":"celonis.com","why":"process mining for enterprises","category":"Process Intelligence"}]`;
+Respond with ONLY: [{"name":"Celonis","domain":"celonis.com","why":"Process-mining platform that helps large enterprises find and fix inefficiencies in their operations","category":"Process Intelligence"}]`;
 
 const buildRadarQueryPrompt = (criteria) => `You build search parameters to find relevant LIVE job postings for a job seeker. Return ONLY a compact minified JSON object, no prose.
 
@@ -283,13 +298,13 @@ STYLE:
 ${s.msgSign ? `- Sign off as: ${s.msgSign}.` : ""}
 ${s.msgGuidance ? `- Extra guidance: ${s.msgGuidance}` : ""}
 
-Distinct messages per persona:
-- hiring_manager: LinkedIn note (MAX 280 chars) AND a short email (subject + body, ${emailLen}, business-case framing).
+Distinct messages per stakeholder:
+- hiring_manager: a LinkedIn note only (MAX 280 chars), business-case framing — no email.
 - bridge: LinkedIn note (MAX 280 chars) asking for a brief insider perspective.
 - recruiter: LinkedIn note (MAX 280 chars) expressing fit + interest.
 
 Respond with ONLY this JSON, no prose:
-{"hiring_manager":{"linkedin":"","email_subject":"","email_body":""},"bridge":{"linkedin":""},"recruiter":{"linkedin":""}}`;
+{"hiring_manager":{"linkedin":""},"bridge":{"linkedin":""},"recruiter":{"linkedin":""}}`;
 };
 
 const buildVerifyPrompt = (company, title, location) => `You are checking whether a specific job posting is still LIVE right now. Use web search.
@@ -480,45 +495,55 @@ export default function App() {
     setFound([]); saveKey("cs_found", []); setLastFresh(null);
   }
 
-  async function pullLive() {
-    if (!watchlist.length) { setErr("Add companies in the Company Engine (tab 03) first — screenable ones feed this free pull."); setTab("companies"); return; }
-    setErr(""); setPulling(true); setScanStatus("pulling live roles from your companies…");
-    try {
-      const res = await fetch("/api/jobs", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ companies: watchlist.map((c) => ({ source: c.source, id: c.token, name: c.name || c.token })) }),
+  async function pullWatchlistJobs() {
+    if (!watchlist.length) return [];
+    const res = await fetch("/api/jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ companies: watchlist.map((c) => ({ source: c.source, id: c.token, name: c.name || c.token })) }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || ("Jobs API error " + res.status));
+    return Array.isArray(data.jobs) ? data.jobs : [];
+  }
+
+  async function scoreWorking(startWorking) {
+    let working = startWorking;
+    const targets = working.filter((r) => !r.outdated && r.score == null);
+    if (!targets.length) return working;
+    const size = 12;
+    const scoreCriteria = { ...criteria, exampleCompanies: library.length ? library.map((c) => c.company) : criteria.exampleCompanies };
+    for (let i = 0; i < targets.length; i += size) {
+      const chunk = targets.slice(i, i + size).map((r, idx) => ({ n: idx + 1, _id: r.id, company: r.company, title: r.title, location: r.location }));
+      setScanStatus(`scoring matches ${Math.min(i + size, targets.length)}/${targets.length}…`);
+      const arr = extractJSON(await callClaude(buildScorePrompt(profile, scoreCriteria, chunk), false, HAIKU));
+      const byN = {};
+      (Array.isArray(arr) ? arr : []).forEach((o) => { if (o && o.n != null) byN[o.n] = o; });
+      working = working.map((r) => {
+        const c = chunk.find((x) => x._id === r.id);
+        if (!c) return r;
+        const o = byN[c.n];
+        if (!o) return r;
+        const sc = Number.isFinite(+o.score) ? Math.max(0, Math.min(100, Math.round(+o.score))) : r.score;
+        return { ...r, score: sc, fit: o.fit || r.fit, signal: o.signal || r.signal };
       });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || ("Jobs API error " + res.status));
-      const jobs = Array.isArray(data.jobs) ? data.jobs : [];
-      const seen = new Set(found.map(roleKey));
-      const fresh = [];
-      for (const j of jobs) {
-        if (!j.company || !j.title) continue;
-        const k = roleKey(j); if (seen.has(k)) continue; seen.add(k);
-        fresh.push({ id: Date.now() + "" + Math.random().toString(36).slice(2, 6), company: j.company, title: j.title, location: j.location || "", link: j.link || "", source: j.source || "", fit: "", signal: "", posted: j.posted || "", score: null, foundAt: Date.now(), live: true, verify: { status: "open", note: "From live ATS feed" } });
-      }
-      const merged = [...fresh, ...found];
-      setFound(merged); saveKey("cs_found", merged);
-      setLastFresh(fresh.length);
-    } catch (e) { setErr("Live pull failed: " + e.message); }
-    setScanStatus(""); setPulling(false);
+      setFound(working); saveKey("cs_found", working);
+    }
+    return working;
   }
 
   async function runRadar() {
-    setErr(""); setRadaring(true); setScanStatus("building query…");
+    setErr(""); setRadaring(true); setScanStatus("building your query…");
     try {
       const rawTitles = (criteria.titles || "").split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
       let useTitles = rawTitles.length ? rawTitles : ["VP Sales", "Head of Sales", "Chief Revenue Officer", "Sales Director", "Country Manager"];
       let patterns = [];
-      // expand titles + derive relevant-company patterns via the LLM (best-effort)
       try {
         const focusCriteria = { ...criteria, exampleCompanies: library.length ? library.map((c) => c.company) : criteria.exampleCompanies };
         const obj = extractJSON(await callClaude(buildRadarQueryPrompt(focusCriteria), false, HAIKU));
         if (obj && Array.isArray(obj.titles) && obj.titles.length) useTitles = Array.from(new Set(obj.titles.map((s) => String(s).trim()).filter(Boolean))).slice(0, 14);
         if (obj && Array.isArray(obj.companyPatterns)) patterns = obj.companyPatterns.map((s) => String(s).trim()).filter(Boolean).slice(0, 10);
-      } catch (e) { /* keep raw titles, no patterns */ }
+      } catch (e) { /* keep raw titles */ }
 
       const REMOTE_MARKETS = new Set(["Remote EMEA", "Remote LATAM", "US Remote"]);
       const markets = (criteria.targetMarkets && criteria.targetMarkets.length) ? criteria.targetMarkets : ["Spain", "Remote EMEA"];
@@ -527,25 +552,40 @@ export default function App() {
       const homeCountries = Array.from(new Set(markets.filter((m) => !REMOTE_MARKETS.has(m)).flatMap((m) => MARKETS[m] || [])));
       const broadRemote = markets.some((m) => REMOTE_MARKETS.has(m));
 
-      setScanStatus("scanning the market…");
-      const res = await fetch("/api/radar", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ titles: useTitles, countries, homeCountries, broadRemote, descriptionPatterns: patterns, maxAgeDays: 30, limit: 25 }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || ("Radar error " + res.status));
-      const jobs = Array.isArray(data.jobs) ? data.jobs : [];
       const seen = new Set(found.map(roleKey));
       const fresh = [];
-      for (const j of jobs) {
+
+      // 1) market radar (already radius-filtered server-side)
+      setScanStatus("scanning the market…");
+      const res = await fetch("/api/radar", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ titles: useTitles, countries, homeCountries, broadRemote, descriptionPatterns: patterns, maxAgeDays: 30, limit: 25 }) });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || ("Radar error " + res.status));
+      for (const j of (Array.isArray(data.jobs) ? data.jobs : [])) {
         if (!j.company || !j.title) continue;
         const k = roleKey(j); if (seen.has(k)) continue; seen.add(k);
         fresh.push({ id: Date.now() + "" + Math.random().toString(36).slice(2, 6), company: j.company, title: j.title, location: j.location || "", link: j.link || "", source: j.source || "Radar", fit: "", signal: "", posted: j.posted || "", score: null, foundAt: Date.now(), radar: true });
       }
-      const merged = [...fresh, ...found];
+
+      // 2) focus companies (free ATS pull) — same radius filter applied
+      if (watchlist.length) {
+        setScanStatus("pulling roles from your focus companies…");
+        try {
+          const atsJobs = await pullWatchlistJobs();
+          for (const j of atsJobs) {
+            if (!j.company || !j.title) continue;
+            if (!inRadius(j.location, homeCountries, broadRemote)) continue;
+            const k = roleKey(j); if (seen.has(k)) continue; seen.add(k);
+            fresh.push({ id: Date.now() + "" + Math.random().toString(36).slice(2, 6), company: j.company, title: j.title, location: j.location || "", link: j.link || "", source: j.source || "", fit: "", signal: "", posted: j.posted || "", score: null, foundAt: Date.now(), live: true, verify: { status: "open", note: "From your focus company's live feed" } });
+          }
+        } catch (e) { /* radar already succeeded — ignore ATS errors */ }
+      }
+
+      let merged = [...fresh, ...found];
       setFound(merged); saveKey("cs_found", merged);
       setLastFresh(fresh.length);
+
+      // 3) always score the new roles
+      if (fresh.length) { merged = await scoreWorking(merged); }
     } catch (e) { setErr("Radar failed: " + e.message); }
     setScanStatus(""); setRadaring(false);
   }
@@ -554,27 +594,7 @@ export default function App() {
     const targets = found.filter((r) => !r.outdated && r.score == null);
     if (!targets.length) { setErr("No unscored roles — everything's already scored."); return; }
     setErr(""); setScoring(true);
-    try {
-      let working = [...found];
-      const size = 12;
-      const scoreCriteria = { ...criteria, exampleCompanies: library.length ? library.map((c) => c.company) : criteria.exampleCompanies };
-      for (let i = 0; i < targets.length; i += size) {
-        const chunk = targets.slice(i, i + size).map((r, idx) => ({ n: idx + 1, _id: r.id, company: r.company, title: r.title, location: r.location }));
-        setScanStatus(`scoring ${Math.min(i + size, targets.length)}/${targets.length}…`);
-        const arr = extractJSON(await callClaude(buildScorePrompt(profile, scoreCriteria, chunk), false, HAIKU));
-        const byN = {};
-        (Array.isArray(arr) ? arr : []).forEach((o) => { if (o && o.n != null) byN[o.n] = o; });
-        working = working.map((r) => {
-          const c = chunk.find((x) => x._id === r.id);
-          if (!c) return r;
-          const o = byN[c.n];
-          if (!o) return r;
-          const sc = Number.isFinite(+o.score) ? Math.max(0, Math.min(100, Math.round(+o.score))) : r.score;
-          return { ...r, score: sc, fit: o.fit || r.fit, signal: o.signal || r.signal };
-        });
-        setFound(working); saveKey("cs_found", working);
-      }
-    } catch (e) { setErr("Scoring failed: " + e.message); }
+    try { await scoreWorking([...found]); } catch (e) { setErr("Scoring failed: " + e.message); }
     setScanStatus(""); setScoring(false);
   }
 
@@ -642,6 +662,8 @@ export default function App() {
       <style>{`
         @keyframes ping{0%{transform:scale(.6);opacity:.4}80%,100%{transform:scale(2.2);opacity:0}}
         @keyframes spin{to{transform:rotate(360deg)}}
+        @keyframes cs-spin{to{transform:rotate(360deg)}}
+        @keyframes cs-slide{0%{transform:translateX(-120%)}100%{transform:translateX(320%)}}
         .cs-in::placeholder{color:${C.faint}}
         .cs-scroll::-webkit-scrollbar{width:8px;height:8px}
         .cs-scroll::-webkit-scrollbar-thumb{background:${C.line};border-radius:8px}
@@ -1002,16 +1024,27 @@ function Sonar({ found, ready, find, loading, pullLive, pulling, runRadar, radar
 
   return (
     <div>
-      <SectionTitle n="04" title="Role Sonar" desc="Found roles accumulate here over time — each scan adds new ones and never repeats what it already found. Map the ICP per role, then send the best to your Cockpit." />
+      <SectionTitle n="04" title="Role Sonar" desc="Hit Run Radar — it scans the market, pulls open roles from your focus companies, and scores every match against your profile. Roles accumulate here over time; send the best to your Cockpit." />
       <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", marginBottom: 16 }}>
-        <button onClick={runRadar} disabled={radaring || pulling || loading} className="cs-cta" style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "12px 20px", borderRadius: 10, fontFamily: MONO, fontSize: 12 }}>{radaring ? <Spin /> : <Radar size={14} />} {radaring ? "SCANNING MARKET…" : "RUN RADAR"}</button>
-        {hasWatchlist && <button onClick={pullLive} disabled={pulling || radaring || loading} style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "12px 18px", borderRadius: 10, cursor: "pointer", border: `1px solid ${C.line}`, background: C.panel, color: C.dim, fontFamily: MONO, fontSize: 12 }}>{pulling ? <Spin /> : <Building2 size={14} />} {pulling ? "PULLING…" : "PULL WATCHLIST"}</button>}
-        <button onClick={scoreRoles} disabled={scoring || !unscored} style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "12px 18px", borderRadius: 10, cursor: unscored ? "pointer" : "default", border: `1px solid ${unscored ? C.teal : C.line}`, background: C.panel, color: unscored ? C.teal : C.faint, fontFamily: MONO, fontSize: 12 }}>{scoring ? <Spin /> : <Sparkles size={14} />} {scoring ? "SCORING…" : `SCORE${unscored ? " (" + unscored + ")" : ""}`}</button>
+        <button onClick={runRadar} disabled={radaring || scoring} className="cs-cta" style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "12px 20px", borderRadius: 10, fontFamily: MONO, fontSize: 12 }}>{radaring ? <Spin /> : <Radar size={14} />} {radaring ? "WORKING…" : "RUN RADAR & SCORE"}</button>
+        <button onClick={scoreRoles} disabled={scoring || radaring || !unscored} style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "12px 18px", borderRadius: 10, cursor: unscored ? "pointer" : "default", border: `1px solid ${unscored ? C.teal : C.line}`, background: C.panel, color: unscored ? C.teal : C.faint, fontFamily: MONO, fontSize: 12 }}>{scoring ? <Spin /> : <Sparkles size={14} />} {scoring ? "SCORING…" : `SCORE${unscored ? " (" + unscored + ")" : ""}`}</button>
         {found.length > 0 && <button onClick={clearFound} disabled={radaring || pulling || scoring} style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "12px 14px", borderRadius: 10, cursor: "pointer", border: `1px solid ${C.line}`, background: C.panel, color: C.faint, fontFamily: MONO, fontSize: 11 }}><Trash2 size={13} /> CLEAR</button>}
         <span style={{ fontFamily: MONO, fontSize: 10.5, color: C.dim }}>{(loading || pulling || scoring) && scanStatus ? <span style={{ color: C.teal }}>{scanStatus}</span> : <>last scan: {lastScan ? agoLabel(lastScan) : "never"}{lastFresh != null && <span style={{ color: lastFresh ? C.teal : C.faint }}> · +{lastFresh} new</span>}</>}</span>
         <button onClick={goSettings} style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 6, background: "transparent", border: "none", cursor: "pointer", color: C.faint, fontFamily: MONO, fontSize: 10.5 }}><Cog size={12} /> scan settings</button>
       </div>
 
+      {(radaring || scoring) && (
+        <div style={{ marginBottom: 16, padding: "16px 18px", borderRadius: 12, border: `1px solid ${C.teal}`, background: C.panel2, boxShadow: `0 0 0 3px ${C.panel}` }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 13 }}>
+            <div style={{ width: 26, height: 26, borderRadius: "50%", border: `3px solid ${C.line}`, borderTopColor: C.teal, animation: "cs-spin 0.8s linear infinite", flexShrink: 0 }} />
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontFamily: MONO, fontSize: 12.5, fontWeight: 700, color: C.teal, letterSpacing: .3 }}>{scanStatus || "WORKING…"}</div>
+              <div style={{ fontSize: 11.5, color: C.dim, marginTop: 3 }}>Scanning the market, pulling your focus companies and scoring every match — this can take up to a minute. You can keep this tab open.</div>
+            </div>
+          </div>
+          <div style={{ marginTop: 12, height: 4, borderRadius: 99, background: C.line, overflow: "hidden" }}><div style={{ height: "100%", width: "40%", borderRadius: 99, background: C.teal, animation: "cs-slide 1.3s ease-in-out infinite" }} /></div>
+        </div>
+      )}
       {found.length > 0 && (
         <div style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap", padding: "11px 13px", border: `1px solid ${C.line}`, borderRadius: 10, background: C.panel, marginBottom: 16 }}>
           <div style={{ display: "flex", gap: 6, alignItems: "center" }}><span style={{ fontFamily: MONO, fontSize: 10, color: C.faint }}>SORT</span><Pill active={sort === "score"} onClick={() => setSort("score")}>BEST MATCH</Pill><Pill active={sort === "new"} onClick={() => setSort("new")}>NEWEST</Pill></div>
@@ -1051,10 +1084,6 @@ function Sonar({ found, ready, find, loading, pullLive, pulling, runRadar, radar
                   </div>
                 </div>
               </div>
-              <div style={{ borderTop: `1px solid ${C.line}`, padding: "10px 16px" }}>
-                {!mapped ? <button onClick={() => mapICP(r.id)} disabled={roleBusy[r.id]} style={{ display: "inline-flex", alignItems: "center", gap: 8, background: "transparent", border: "none", cursor: roleBusy[r.id] ? "default" : "pointer", color: C.teal, fontFamily: MONO, fontSize: 11.5, letterSpacing: .5, padding: 0 }}>{roleBusy[r.id] ? <Spin /> : <ChevronDown size={14} />} {roleBusy[r.id] ? "MAPPING ICP… ~20–40s" : "MAP ROLE ICP (3 personas)"}</button>
-                  : <div><Block label="SNAPSHOT" body={r.research.snapshot} />{r.research.why_open && <Block label="WHY THIS ROLE EXISTS" body={r.research.why_open} />}<PersonaList personas={r.research.personas} company={r.company} /></div>}
-              </div>
             </div>
           );
         })}
@@ -1089,8 +1118,8 @@ function Cockpit({ targets, sel, setSelId, remove, research, draft, busy, patch,
             {sel.verify?.note && <span style={{ fontSize: 11.5, color: C.dim }}>{sel.verify.note}</span>}
             {sel.verify?.url && sel.verify.url !== sel.link && <a href={sel.verify.url} target="_blank" rel="noreferrer" style={{ fontFamily: MONO, fontSize: 10.5, color: C.teal, textDecoration: "none", display: "inline-flex", gap: 4, alignItems: "center" }}><ExternalLink size={11} /> current link</a>}
           </div>
-          {!sel.research ? <Action icon={Building2} label="RUN COMPANY SONAR" desc="Research the account & map your three personas." loading={busy[sel.id] === "research"} onClick={() => research(sel)} />
-            : <div style={{ marginBottom: 18 }}><Block label="SNAPSHOT" body={sel.research.snapshot} />{sel.research.signal && <Block label="SIGNAL" body={sel.research.signal} color={C.amber} />}{sel.research.why_open && <Block label="WHY THIS ROLE EXISTS" body={sel.research.why_open} />}<PersonaList personas={sel.research.personas} company={sel.company} /><div style={{ marginTop: 14 }}><div style={{ display: "flex", alignItems: "center", gap: 13, flexWrap: "wrap", padding: "13px 15px", borderRadius: 10, border: `1px solid ${C.line}`, borderLeft: `3px solid ${C.teal}`, background: C.panel2, marginBottom: 12 }}><SlidersHorizontal size={17} color={C.teal} style={{ flexShrink: 0 }} /><div style={{ display: "flex", flexDirection: "column", gap: 7 }}><span style={{ fontFamily: MONO, fontSize: 9.5, letterSpacing: .8, color: C.dim, textTransform: "uppercase", fontWeight: 700 }}>Outreach style</span><div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}><span style={{ fontFamily: MONO, fontSize: 10.5, fontWeight: 700, color: "#fff", background: C.teal, borderRadius: 6, padding: "3px 9px" }}>{settings.msgTone}</span><span style={{ fontFamily: MONO, fontSize: 10.5, fontWeight: 600, color: C.dim, background: C.panel, border: `1px solid ${C.line}`, borderRadius: 6, padding: "3px 9px" }}>{settings.msgLength}</span><span style={{ fontFamily: MONO, fontSize: 10.5, fontWeight: 600, color: C.dim, background: C.panel, border: `1px solid ${C.line}`, borderRadius: 6, padding: "3px 9px" }}>{settings.msgLang === "Auto" ? "Auto language" : settings.msgLang}</span><span style={{ fontFamily: MONO, fontSize: 10.5, fontWeight: 600, color: settings.msgMetrics ? C.amber : C.green, background: C.panel, border: `1px solid ${settings.msgMetrics ? C.amber : C.green}`, borderRadius: 6, padding: "3px 9px" }}>{settings.msgMetrics ? "KPIs upfront" : "No upfront KPIs"}</span></div></div><button onClick={goSettings} style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 6, padding: "9px 14px", borderRadius: 8, cursor: "pointer", border: `1px solid ${C.teal}`, background: C.panel, color: C.teal, fontFamily: MONO, fontSize: 10.5, letterSpacing: .5, fontWeight: 700 }}><Cog size={13} /> EDIT STYLE</button></div>{!sel.drafts ? <Action icon={Mail} label="DRAFT ROLE-ICP OUTREACH" desc="Write the three threaded messages." loading={busy[sel.id] === "draft"} onClick={() => draft(sel)} /> : <button onClick={() => draft(sel)} disabled={busy[sel.id] === "draft"} style={ghostBtn}>{busy[sel.id] === "draft" ? <Spin /> : <RefreshCw size={13} />} REGENERATE DRAFTS</button>}</div></div>}
+          {!sel.research ? <Action icon={Building2} label="MAP KEY STAKEHOLDERS" desc="Research the account & map who to reach." loading={busy[sel.id] === "research"} onClick={() => research(sel)} />
+            : <div style={{ marginBottom: 18 }}><Block label="SNAPSHOT" body={sel.research.snapshot} />{sel.research.signal && <Block label="SIGNAL" body={sel.research.signal} color={C.amber} />}{sel.research.why_open && <Block label="WHY THIS ROLE EXISTS" body={sel.research.why_open} />}<PersonaList personas={sel.research.personas} company={sel.company} /><div style={{ marginTop: 14 }}><div style={{ display: "flex", alignItems: "center", gap: 13, flexWrap: "wrap", padding: "13px 15px", borderRadius: 10, border: `1px solid ${C.line}`, borderLeft: `3px solid ${C.teal}`, background: C.panel2, marginBottom: 12 }}><SlidersHorizontal size={17} color={C.teal} style={{ flexShrink: 0 }} /><div style={{ display: "flex", flexDirection: "column", gap: 7 }}><span style={{ fontFamily: MONO, fontSize: 9.5, letterSpacing: .8, color: C.dim, textTransform: "uppercase", fontWeight: 700 }}>Outreach style</span><div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}><span style={{ fontFamily: MONO, fontSize: 10.5, fontWeight: 700, color: "#fff", background: C.teal, borderRadius: 6, padding: "3px 9px" }}>{settings.msgTone}</span><span style={{ fontFamily: MONO, fontSize: 10.5, fontWeight: 600, color: C.dim, background: C.panel, border: `1px solid ${C.line}`, borderRadius: 6, padding: "3px 9px" }}>{settings.msgLength}</span><span style={{ fontFamily: MONO, fontSize: 10.5, fontWeight: 600, color: C.dim, background: C.panel, border: `1px solid ${C.line}`, borderRadius: 6, padding: "3px 9px" }}>{settings.msgLang === "Auto" ? "Auto language" : settings.msgLang}</span><span style={{ fontFamily: MONO, fontSize: 10.5, fontWeight: 600, color: settings.msgMetrics ? C.amber : C.green, background: C.panel, border: `1px solid ${settings.msgMetrics ? C.amber : C.green}`, borderRadius: 6, padding: "3px 9px" }}>{settings.msgMetrics ? "KPIs upfront" : "No upfront KPIs"}</span></div></div><button onClick={goSettings} style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 6, padding: "9px 14px", borderRadius: 8, cursor: "pointer", border: `1px solid ${C.teal}`, background: C.panel, color: C.teal, fontFamily: MONO, fontSize: 10.5, letterSpacing: .5, fontWeight: 700 }}><Cog size={13} /> EDIT STYLE</button></div>{!sel.drafts ? <Action icon={Mail} label="DRAFT OUTREACH" desc="Write the messages for each key stakeholder." loading={busy[sel.id] === "draft"} onClick={() => draft(sel)} /> : <button onClick={() => draft(sel)} disabled={busy[sel.id] === "draft"} style={ghostBtn}>{busy[sel.id] === "draft" ? <Spin /> : <RefreshCw size={13} />} REGENERATE DRAFTS</button>}</div></div>}
           {sel.drafts && <Drafts target={sel} patch={patch} />}
           <div style={{ marginTop: 18, borderTop: `1px solid ${C.line}`, paddingTop: 16, display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
             <button onClick={() => markApplied(sel.id)} style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "12px 20px", borderRadius: 10, cursor: "pointer", border: "none", background: C.green, color: "#fff", fontFamily: MONO, fontSize: 12.5, letterSpacing: .4, fontWeight: 700, boxShadow: "0 6px 18px rgba(16,185,129,.34)" }}><Send size={14} /> MARK AS APPLIED</button>
@@ -1202,12 +1231,12 @@ function SettingsTab({ settings, update, foundCount, clearHistory }) {
 
 /* ---------------- shared ---------------- */
 function PersonaList({ personas, company }) {
-  return (<div><div style={{ fontFamily: MONO, fontSize: 11, letterSpacing: .5, color: C.dim, margin: "14px 0 9px" }}>THREE-PERSONA MAP</div><div style={{ display: "grid", gap: 9 }}>{(personas || []).map((p, i) => { const meta = PERSONA[p.type] || { label: p.type, sub: "", color: C.dim }; const url = "https://www.linkedin.com/search/results/people/?keywords=" + encodeURIComponent((p.linkedin_query || p.title || "") + " " + company); return (<div key={i} style={{ border: `1px solid ${C.line}`, borderLeft: `3px solid ${meta.color}`, borderRadius: 8, padding: 13, background: C.bg }}><div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}><span style={{ fontFamily: MONO, fontSize: 11, letterSpacing: .5, color: meta.color }}>{meta.label.toUpperCase()} · {meta.sub}</span><a href={url} target="_blank" rel="noreferrer" style={{ display: "inline-flex", gap: 5, alignItems: "center", fontFamily: MONO, fontSize: 10.5, color: C.dim, textDecoration: "none" }}><Linkedin size={12} /> find</a></div><div style={{ fontSize: 13.5, fontWeight: 600, marginTop: 6 }}>{p.name || p.title}{p.name && p.title ? <span style={{ color: C.dim, fontWeight: 400 }}> · {p.title}</span> : null}</div>{p.hook && <div style={{ fontSize: 12.5, color: C.dim, marginTop: 5, lineHeight: 1.5 }}>↳ {p.hook}</div>}</div>); })}</div></div>);
+  return (<div><div style={{ fontFamily: MONO, fontSize: 11, letterSpacing: .5, color: C.dim, margin: "14px 0 9px" }}>KEY STAKEHOLDERS</div><div style={{ display: "grid", gap: 9 }}>{(personas || []).map((p, i) => { const meta = PERSONA[p.type] || { label: p.type, sub: "", color: C.dim }; const url = "https://www.linkedin.com/search/results/people/?keywords=" + encodeURIComponent((p.linkedin_query || p.title || "") + " " + company); return (<div key={i} style={{ border: `1px solid ${C.line}`, borderLeft: `3px solid ${meta.color}`, borderRadius: 8, padding: 13, background: C.bg }}><div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}><span style={{ fontFamily: MONO, fontSize: 11, letterSpacing: .5, color: meta.color }}>{meta.label.toUpperCase()} · {meta.sub}</span><a href={url} target="_blank" rel="noreferrer" style={{ display: "inline-flex", gap: 5, alignItems: "center", fontFamily: MONO, fontSize: 10.5, color: C.dim, textDecoration: "none" }}><Linkedin size={12} /> find</a></div><div style={{ fontSize: 13.5, fontWeight: 600, marginTop: 6 }}>{p.name || p.title}{p.name && p.title ? <span style={{ color: C.dim, fontWeight: 400 }}> · {p.title}</span> : null}</div>{p.hook && <div style={{ fontSize: 12.5, color: C.dim, marginTop: 5, lineHeight: 1.5 }}>↳ {p.hook}</div>}</div>); })}</div></div>);
 }
 function Drafts({ target, patch }) {
   const d = target.drafts; const update = (persona, field, val) => patch(target.id, { drafts: { ...d, [persona]: { ...d[persona], [field]: val } } });
   return (<div style={{ display: "grid", gap: 14, marginTop: 6 }}>
-    <MsgCard color={PERSONA.hiring_manager.color} title="Hiring Manager — economic buyer"><Editable label="LinkedIn note" value={d.hiring_manager?.linkedin || ""} onChange={(v) => update("hiring_manager", "linkedin", v)} small /><Editable label="Email subject" value={d.hiring_manager?.email_subject || ""} onChange={(v) => update("hiring_manager", "email_subject", v)} small /><Editable label="Email body" value={d.hiring_manager?.email_body || ""} onChange={(v) => update("hiring_manager", "email_body", v)} rows={6} /></MsgCard>
+    <MsgCard color={PERSONA.hiring_manager.color} title="Hiring Manager — economic buyer"><Editable label="LinkedIn note" value={d.hiring_manager?.linkedin || ""} onChange={(v) => update("hiring_manager", "linkedin", v)} small /></MsgCard>
     <MsgCard color={PERSONA.bridge.color} title="Future Teammate — your bridge"><Editable label="LinkedIn note" value={d.bridge?.linkedin || ""} onChange={(v) => update("bridge", "linkedin", v)} rows={3} /></MsgCard>
     <MsgCard color={PERSONA.recruiter.color} title="Recruiter / TA — process"><Editable label="LinkedIn note" value={d.recruiter?.linkedin || ""} onChange={(v) => update("recruiter", "linkedin", v)} rows={3} /></MsgCard>
   </div>);
