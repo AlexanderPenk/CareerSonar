@@ -66,7 +66,11 @@ async function callClaude(content, useSearch, attempt = 0) {
     body: JSON.stringify({ content, useSearch }),
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || ("API error " + res.status));
+  if (!res.ok) {
+    const em = data && data.error;
+    const msg = typeof em === "string" ? em : (em && (em.message || (em.error && em.error.message))) || ("API error " + res.status);
+    throw new Error(msg);
+  }
   return data.text || "";
 }
 
@@ -576,7 +580,7 @@ export default function App() {
 
       <div style={{ padding: 22 }}>
         {tab === "profile" && <Profile profile={profile} setProfile={setProfile} save={saveProfile} saved={profileSaved} applyExtract={applyExtract} goCriteria={() => setTab("criteria")} />}
-        {tab === "criteria" && <Criteria criteria={criteria} setCriteria={setCriteria} save={saveCriteria} saved={criteriaSaved} ready={criteriaReady} watchlist={watchlist} saveWatchlist={saveWatchlist} runSonar={() => { setTab("sonar"); findRoles(); }} />}
+        {tab === "criteria" && <Criteria criteria={criteria} setCriteria={setCriteria} save={saveCriteria} saved={criteriaSaved} ready={criteriaReady} watchlist={watchlist} saveWatchlist={saveWatchlist} runSonar={() => { setTab("sonar"); runRadar(); }} />}
         {tab === "sonar" && <Sonar found={found} ready={criteriaReady} find={findRoles} loading={loadingRoles} pullLive={pullLive} pulling={pulling} runRadar={runRadar} radaring={radaring} scoreRoles={scoreRoles} scoring={scoring} hasWatchlist={watchlist.length > 0} scanStatus={scanStatus} lastScan={settings.lastScan} lastFresh={lastFresh} roleBusy={roleBusy} mapICP={mapRoleICP} add={addToPipeline} removeFound={removeFound} verifyFound={verifyFound} verifyBusy={verifyBusy} restoreFound={restoreFound} workMode={criteria.workMode} pipeline={pipeline} goCriteria={() => setTab("criteria")} goSettings={() => setTab("settings")} />}
         {tab === "pipeline" && <Cockpit targets={openTargets} sel={sel} setSelId={setSelId} remove={removeTarget} research={researchTarget} draft={draftOutreach} busy={busy} patch={patchTarget} markApplied={markApplied} verifyTarget={verifyTarget} verifyBusy={verifyBusy} markOutdated={markOutdated} settings={settings} goSettings={() => setTab("settings")} appliedCount={appliedTargets.length} goSonar={() => setTab("sonar")} goTracker={() => setTab("tracker")} />}
         {tab === "tracker" && <Tracker targets={appliedTargets} patch={patchTarget} unApply={unApply} remove={removeTarget} goCockpit={() => setTab("pipeline")} />}
@@ -712,7 +716,7 @@ function Criteria({ criteria, setCriteria, save, saved, ready, watchlist, saveWa
 
       <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
         <SaveBtn onClick={save} saved={saved} label="SAVE CRITERIA" />
-        <button onClick={runSonar} disabled={!ready} className="cs-cta" style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "12px 20px", borderRadius: 10, fontFamily: MONO, fontSize: 12 }}><Search size={14} /> RUN ROLE SONAR</button>
+        <button onClick={runSonar} disabled={!ready} className="cs-cta" style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "12px 20px", borderRadius: 10, fontFamily: MONO, fontSize: 12 }}><Radar size={14} /> RUN RADAR</button>
         {!ready && <span style={{ fontFamily: MONO, fontSize: 11, color: C.faint }}>add at least a target title</span>}
       </div>
     </div>
