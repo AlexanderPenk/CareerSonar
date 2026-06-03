@@ -2,7 +2,8 @@ import React, { useState, useEffect } from "react";
 import {
   Radar, Search, Building2, Mail, Linkedin, Copy, Check, Plus, X, Loader2, Target,
   ChevronRight, ChevronDown, Trash2, RefreshCw, User, AlertCircle, ExternalLink,
-  Upload, FileText, Sparkles, SlidersHorizontal, Send, ClipboardList, Undo2, Clock, Settings as Cog
+  Upload, FileText, Sparkles, SlidersHorizontal, Send, ClipboardList, Undo2, Clock, Settings as Cog,
+  Lock, ArrowRight, Zap, Gauge, Users, LogOut
 } from "lucide-react";
 import mammoth from "mammoth";
 
@@ -367,7 +368,7 @@ const LENGTHS = ["Concise", "Standard", "Detailed"];
 const LANGS = ["Auto", "English", "German"];
 
 /* ================================================================== */
-export default function App() {
+function Tool({ signedInEmail, onSignOut }) {
   const [tab, setTab] = useState("profile");
   const [profile, setProfile] = useState(EMPTY_PROFILE);
   const [criteria, setCriteria] = useState(EMPTY_CRITERIA);
@@ -710,6 +711,7 @@ export default function App() {
               <Icon size={13} color={tab === id ? C.teal : C.dim} /> {label}
             </button>
           ))}
+          {onSignOut && <button onClick={onSignOut} title={signedInEmail ? ("Signed in as " + signedInEmail + " — sign out") : "Sign out"} style={{ display: "flex", alignItems: "center", gap: 7, padding: "8px 13px", borderRadius: 8, cursor: "pointer", fontFamily: MONO, fontSize: 11, letterSpacing: .5, fontWeight: 500, border: `1px solid ${C.line}`, background: "transparent", color: C.faint }}><LogOut size={13} color={C.faint} /> Sign out</button>}
         </div>
       </div>
 
@@ -1278,3 +1280,157 @@ function Block({ label, body, color }) { return <div style={{ marginBottom: 10 }
 function Action({ icon: Icon, label, desc, loading, onClick }) { return (<button onClick={onClick} disabled={loading} style={{ width: "100%", textAlign: "left", display: "flex", alignItems: "center", gap: 13, padding: 15, borderRadius: 10, cursor: loading ? "default" : "pointer", border: `1px dashed ${C.teal}`, background: C.panel, color: C.text }}><div style={{ width: 34, height: 34, borderRadius: 8, display: "grid", placeItems: "center", background: C.panel2, flexShrink: 0 }}>{loading ? <Spin /> : <Icon size={17} color={C.teal} />}</div><div><div style={{ fontFamily: MONO, fontSize: 12, letterSpacing: .5 }}>{loading ? "WORKING… ~20–40s" : label}</div><div style={{ fontSize: 12.5, color: C.dim, marginTop: 2 }}>{desc}</div></div>{!loading && <ChevronRight size={16} color={C.faint} style={{ marginLeft: "auto" }} />}</button>); }
 function MsgCard({ color, title, children }) { return <div style={{ border: `1px solid ${C.line}`, borderTop: `3px solid ${color}`, borderRadius: 10, padding: 15, background: C.panel }}><div style={{ fontFamily: MONO, fontSize: 11, letterSpacing: .5, color, marginBottom: 12 }}>{title.toUpperCase()}</div>{children}</div>; }
 function Empty({ icon: Icon, title, desc, action, onClick }) { return (<div style={{ display: "grid", placeItems: "center", padding: "70px 20px", textAlign: "center" }}><div style={{ width: 52, height: 52, borderRadius: 12, display: "grid", placeItems: "center", background: C.panel, border: `1px solid ${C.line}`, marginBottom: 16 }}><Icon size={24} color={C.dim} /></div><div style={{ fontSize: 18, fontWeight: 600, fontFamily: SERIF, marginBottom: 6 }}>{title}</div><p style={{ color: C.dim, fontSize: 13.5, maxWidth: 380, lineHeight: 1.5, margin: "0 0 18px" }}>{desc}</p><button onClick={onClick} style={{ ...ghostBtn, border: `1px solid ${C.teal}` }}>{action}</button></div>); }
+
+/* ================= LANDING PAGE + AUTH GATE ================= */
+
+function GradText({ children, style }) {
+  return <span style={{ background: GRAD, WebkitBackgroundClip: "text", backgroundClip: "text", color: "transparent", ...style }}>{children}</span>;
+}
+
+function Feature({ icon: Icon, title, body }) {
+  return (
+    <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 16, padding: 24, display: "flex", flexDirection: "column", gap: 12 }}>
+      <div style={{ width: 44, height: 44, borderRadius: 11, display: "grid", placeItems: "center", background: C.panel2 }}><Icon size={22} color={C.teal} /></div>
+      <div style={{ fontFamily: SERIF, fontSize: 18, fontWeight: 700, letterSpacing: -.3 }}>{title}</div>
+      <div style={{ fontSize: 14, lineHeight: 1.6, color: C.dim }}>{body}</div>
+    </div>
+  );
+}
+
+function AuthCard({ onAuthed }) {
+  const [mode, setMode] = useState("signin");
+  const [email, setEmail] = useState(""); const [pw, setPw] = useState(""); const [name, setName] = useState("");
+  const [busy, setBusy] = useState(false); const [err, setErr] = useState("");
+  const hash = (s) => { let h = 5381; for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0; return "h" + h; };
+  const inp = { width: "100%", padding: "12px 14px", borderRadius: 10, border: `1px solid ${C.line}`, background: C.bg, color: C.text, fontFamily: SANS, fontSize: 14, outline: "none", boxSizing: "border-box" };
+
+  async function submit() {
+    setErr(""); setBusy(true);
+    try {
+      const em = email.trim().toLowerCase();
+      if (!em || !pw) throw new Error("Enter your email and password.");
+      const accs = (await loadKey("cs_accounts", [])) || [];
+      if (mode === "register") {
+        if (pw.length < 6) throw new Error("Use at least 6 characters for your password.");
+        if (accs.find((a) => a.email === em)) throw new Error("An account with this email already exists on this device — sign in instead.");
+        accs.push({ email: em, name: name.trim(), pw: hash(pw) });
+        await saveKey("cs_accounts", accs);
+        await saveKey("cs_session", { email: em, name: name.trim() });
+        onAuthed(em); return;
+      }
+      const local = accs.find((a) => a.email === em);
+      if (local) {
+        if (local.pw !== hash(pw)) throw new Error("Wrong password.");
+        await saveKey("cs_session", { email: em, name: local.name || "" });
+        onAuthed(em); return;
+      }
+      const res = await fetch("/api/auth", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: em, password: pw }) });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.ok) { await saveKey("cs_session", { email: em }); onAuthed(em); return; }
+      throw new Error(data.error || "Email or password not recognized.");
+    } catch (e) { setErr(e.message); setBusy(false); }
+  }
+
+  return (
+    <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 18, padding: 28, boxShadow: "0 24px 60px rgba(20,24,60,.10)", width: "100%", maxWidth: 400 }}>
+      <div style={{ display: "flex", gap: 4, background: C.panel2, borderRadius: 10, padding: 4, marginBottom: 22 }}>
+        {[["signin", "Sign in"], ["register", "Create account"]].map(([m, label]) => (
+          <button key={m} onClick={() => { setMode(m); setErr(""); }} style={{ flex: 1, padding: "9px 0", borderRadius: 7, border: "none", cursor: "pointer", fontFamily: MONO, fontSize: 12.5, fontWeight: 700, letterSpacing: .3, background: mode === m ? C.panel : "transparent", color: mode === m ? C.teal : C.dim, boxShadow: mode === m ? "0 1px 3px rgba(0,0,0,.06)" : "none" }}>{label}</button>
+        ))}
+      </div>
+      <div style={{ display: "grid", gap: 12 }}>
+        {mode === "register" && <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Your name (optional)" style={inp} />}
+        <input value={email} onChange={(e) => setEmail(e.target.value)} type="email" placeholder="Email" style={inp} onKeyDown={(e) => e.key === "Enter" && submit()} />
+        <input value={pw} onChange={(e) => setPw(e.target.value)} type="password" placeholder="Password" style={inp} onKeyDown={(e) => e.key === "Enter" && submit()} />
+        {err && <div style={{ fontSize: 12.5, color: C.red, display: "flex", gap: 7, alignItems: "flex-start", lineHeight: 1.45 }}><AlertCircle size={14} style={{ flexShrink: 0, marginTop: 1 }} /> {err}</div>}
+        <button onClick={submit} disabled={busy} style={{ marginTop: 4, display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 9, padding: "13px 18px", borderRadius: 11, border: "none", cursor: busy ? "default" : "pointer", background: GRAD, color: "#fff", fontFamily: MONO, fontSize: 13, fontWeight: 700, letterSpacing: .4, boxShadow: "0 8px 22px rgba(109,74,255,.35)", opacity: busy ? .6 : 1 }}>
+          {busy ? <Loader2 size={16} className="cs-spin-ld" /> : <ArrowRight size={16} />} {mode === "register" ? "CREATE ACCOUNT" : "SIGN IN"}
+        </button>
+      </div>
+      <div style={{ marginTop: 16, fontSize: 11.5, color: C.faint, lineHeight: 1.5, display: "flex", gap: 7 }}><Lock size={13} style={{ flexShrink: 0, marginTop: 1 }} /> Private access — you need an account to enter the tool. Your session stays on this device.</div>
+    </div>
+  );
+}
+
+function Landing({ onAuthed }) {
+  const features = [
+    [Search, "Screens the whole market for you", "Set your profile, experience, goals and preferences once. Career Sonar scans the market and surfaces the roles that actually fit — so you stop sifting through job boards."],
+    [Gauge, "Tells you how well each role fits", "Every opening gets a 0–100 fit score built from YOUR background and goals — not keyword matching — with a plain-language reason. Spend energy only where it counts."],
+    [Users, "Reach the people, not the void", "For each role it researches the team behind it and maps the key stakeholders — hiring manager, an internal bridge, the recruiter — with direct links to find them."],
+    [Send, "Personal, not anonymous", "It drafts tailored outreach in your own voice, so you arrive as a person with a point of view — not application #4,072 in a faceless pile."],
+  ];
+  return (
+    <div style={{ minHeight: "100vh", background: C.bg, color: C.text, fontFamily: SANS }}>
+      <style>{`
+        @keyframes cs-spin-ld{to{transform:rotate(360deg)}}
+        .cs-spin-ld{animation:cs-spin-ld .8s linear infinite}
+        @keyframes cs-ping2{0%{transform:scale(.6);opacity:.4}80%,100%{transform:scale(2.2);opacity:0}}
+        .cs-land input::placeholder{color:${C.faint}}
+        .cs-land input:focus{border-color:${C.teal}}
+        .cs-hero{display:grid;grid-template-columns:minmax(0,1.12fr) minmax(0,.88fr);gap:48px;align-items:center;padding:40px 0 64px}
+        @media(max-width:860px){.cs-hero{grid-template-columns:1fr;gap:34px;padding:20px 0 44px}.cs-h1{font-size:36px !important;letter-spacing:-1px !important}.cs-sub{font-size:16px !important}}
+      `}</style>
+      <div className="cs-land" style={{ maxWidth: 1140, margin: "0 auto", padding: "0 22px" }}>
+        <header style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "26px 0" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 13 }}>
+            <div style={{ position: "relative", width: 40, height: 40, display: "grid", placeItems: "center" }}>
+              <span style={{ position: "absolute", inset: 0, borderRadius: "50%", border: `1.5px solid ${C.teal}`, animation: "cs-ping2 2.6s cubic-bezier(0,0,.2,1) infinite" }} />
+              <Radar size={26} color={C.teal} />
+            </div>
+            <GradText style={{ fontFamily: SERIF, letterSpacing: -.6, fontSize: 23, fontWeight: 800 }}>Career Sonar</GradText>
+          </div>
+          <a href="#start" style={{ fontFamily: MONO, fontSize: 12.5, fontWeight: 700, color: C.teal, textDecoration: "none" }}>Sign in →</a>
+        </header>
+
+        <section id="start" className="cs-hero">
+          <div>
+            <div style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "6px 13px", borderRadius: 99, border: `1px solid ${C.line}`, background: C.panel, fontFamily: MONO, fontSize: 11, fontWeight: 700, letterSpacing: 1, color: C.teal, marginBottom: 22 }}><Sparkles size={13} /> AI JOB-SEARCH RADAR</div>
+            <h1 className="cs-h1" style={{ fontFamily: SERIF, fontSize: 50, lineHeight: 1.05, letterSpacing: -1.5, fontWeight: 800, margin: "0 0 20px" }}>The right roles find <GradText>you</GradText> — before you go looking.</h1>
+            <p className="cs-sub" style={{ fontSize: 18, lineHeight: 1.6, color: C.dim, maxWidth: 540, margin: "0 0 26px" }}>Career Sonar is your AI job-search radar. It scans the market against your profile, experience and goals, scores how well each role fits, and helps you reach the people behind it — so your search is faster, sharper and personal.</p>
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+              {["Easier", "Faster", "More efficient"].map((t) => (
+                <span key={t} style={{ display: "inline-flex", alignItems: "center", gap: 7, padding: "8px 14px", borderRadius: 99, background: C.panel, border: `1px solid ${C.line}`, fontFamily: MONO, fontSize: 12.5, fontWeight: 600, color: C.text }}><Check size={14} color={C.green} /> {t}</span>
+              ))}
+            </div>
+          </div>
+          <div style={{ display: "flex", justifyContent: "center" }}><AuthCard onAuthed={onAuthed} /></div>
+        </section>
+
+        <section style={{ textAlign: "center", padding: "10px 0 50px" }}>
+          <h2 style={{ fontFamily: SERIF, fontSize: 30, letterSpacing: -.8, fontWeight: 800, margin: "0 0 14px" }}>Job searching is broken. <GradText>This fixes it.</GradText></h2>
+          <p style={{ fontSize: 16, lineHeight: 1.6, color: C.dim, maxWidth: 640, margin: "0 auto" }}>Endless scrolling, generic applications, no idea who's on the other side. Career Sonar turns the hunt into a focused, intelligent process — driven by your goals, not the job board's.</p>
+        </section>
+
+        <section style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(250px,1fr))", gap: 18, paddingBottom: 60 }}>
+          {features.map(([Icon, title, body]) => <Feature key={title} icon={Icon} title={title} body={body} />)}
+        </section>
+
+        <section style={{ paddingBottom: 70 }}>
+          <h2 style={{ fontFamily: SERIF, fontSize: 26, letterSpacing: -.6, fontWeight: 800, textAlign: "center", margin: "0 0 34px" }}>From profile to a personal reach-out — in minutes</h2>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))", gap: 18 }}>
+            {[["01", "Tell it who you are", "Your experience, goals, target roles, industries and where you'll work."], ["02", "Let the radar run", "It scans the market and your focus companies, then scores every match for fit."], ["03", "Reach the right people", "Get the key stakeholders and a tailored, in-your-voice message for each role."]].map(([n, t, b]) => (
+              <div key={n} style={{ padding: 22 }}>
+                <GradText style={{ fontFamily: SERIF, fontSize: 34, fontWeight: 800 }}>{n}</GradText>
+                <div style={{ fontFamily: SERIF, fontSize: 17, fontWeight: 700, margin: "8px 0 7px" }}>{t}</div>
+                <div style={{ fontSize: 14, lineHeight: 1.6, color: C.dim }}>{b}</div>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <footer style={{ borderTop: `1px solid ${C.line}`, padding: "22px 0 40px", display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 12, fontFamily: MONO, fontSize: 11.5, color: C.faint }}>
+          <span>Career Sonar · your AI job-search radar</span>
+          <span>Built for a focused, personal job search.</span>
+        </footer>
+      </div>
+    </div>
+  );
+}
+
+export default function App() {
+  const [authed, setAuthed] = useState(null); // null = checking session
+  useEffect(() => { (async () => { const s = await loadKey("cs_session", null); setAuthed(s && s.email ? s : false); })(); }, []);
+  if (authed === null) return <div style={{ minHeight: "100vh", background: C.bg }} />;
+  if (!authed) return <Landing onAuthed={(em) => setAuthed({ email: em })} />;
+  return <Tool signedInEmail={authed.email} onSignOut={async () => { await saveKey("cs_session", null); setAuthed(false); }} />;
+}
