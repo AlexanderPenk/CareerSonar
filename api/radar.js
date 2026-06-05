@@ -81,7 +81,20 @@ async function runSearch({ key, titles, countries, homeCountries, broadRemote, p
     if (isRemote && !/remote/i.test(loc)) loc = loc ? loc + " · Remote" : "Remote";
     const link = j.url || j.final_url || j.source_url || j.apply_url || co.url || "";
     const posted = j.date_posted || j.posted_date || j.discovered_at || "";
-    return { company, title, location: loc, link, source: "Radar (TheirStack)", posted };
+    let domain = clean(co.domain || co.website || co.company_domain || "");
+    if (!domain) { const m = String(co.url || link || "").match(/^https?:\/\/(?:www\.)?([^\/]+)/i); if (m) domain = m[1]; }
+    domain = domain.replace(/^www\./, "");
+    const num = co.employee_count || co.num_employees || co.headcount;
+    const cobj = {
+      domain,
+      industry: clean(co.industry || co.industry_name || (Array.isArray(co.industries) ? co.industries[0] : "") || ""),
+      size: clean(co.employee_count_range || co.company_size || co.num_employees_range || (num ? String(num) : "")),
+      hq: tidy([co.hq_city || co.city, co.hq_country || co.country || co.country_code].filter(Boolean).join(", ")),
+      founded: clean(co.founded_year || co.year_founded || co.founded || ""),
+      revenue: clean(co.annual_revenue_usd || co.annual_revenue || co.revenue || ""),
+    };
+    const hasCo = Object.values(cobj).some(Boolean);
+    return { company, title, location: loc, link, source: "Radar (TheirStack)", posted, co: hasCo ? cobj : undefined };
   }).filter((j) => j.title && j.company);
 
   const total = (data.metadata && (data.metadata.total_results || data.metadata.total_count)) || undefined;
@@ -102,7 +115,7 @@ export default async function handler(req, res) {
       const limit = Math.min(Number(q.limit) || 5, 25);
       if (!titles.length && !countries.length) { res.status(200).json({ ok: true, v: 6, hint: "test with ?title=Head of Sales&country=ES&days=30&limit=5" }); return; }
       const out = await runSearch({ key, titles, countries, patterns, maxAge, limit });
-      res.status(200).json({ v: 6, count: out.jobs.length, total: out.total, returned: out.returned, jobs: out.jobs, _debug: out._debug });
+      res.status(200).json({ v: 7, count: out.jobs.length, total: out.total, returned: out.returned, jobs: out.jobs, _debug: out._debug });
       return;
     }
 
@@ -114,7 +127,7 @@ export default async function handler(req, res) {
       const homeCountries = Array.isArray(body.homeCountries) ? body.homeCountries.filter(Boolean) : [];
       const broadRemote = !!body.broadRemote;
       const out = await runSearch({ key, titles, countries, homeCountries, broadRemote, patterns, maxAge: Number(body.maxAgeDays) || 30, limit: Number(body.limit) || 25 });
-      res.status(200).json({ v: 6, count: out.jobs.length, total: out.total, returned: out.returned, jobs: out.jobs });
+      res.status(200).json({ v: 7, count: out.jobs.length, total: out.total, returned: out.returned, jobs: out.jobs });
       return;
     }
 
