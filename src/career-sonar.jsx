@@ -156,6 +156,15 @@ function titleRelevant(title, useTitles) {
 const CODE2NAME = { ES: "Spain", GB: "UK", IE: "Ireland", DE: "Germany", FR: "France", NL: "Netherlands", PT: "Portugal", IT: "Italy", SE: "Sweden", DK: "Denmark", NO: "Norway", FI: "Finland", PL: "Poland", CH: "Switzerland", AT: "Austria", BE: "Belgium", US: "United States", CA: "Canada", IN: "India", AU: "Australia", SG: "Singapore", MX: "Mexico", BR: "Brazil", AE: "UAE", SA: "Saudi Arabia", QA: "Qatar" };
 const REMOTE_BUCKET = "Remote / multi-region";
 function roleCountries(loc) { const out = []; for (const c of _jobCodes(loc)) out.push(CODE2NAME[c] || c); return Array.from(new Set(out)); }
+function stageColor(t) { const s = String(t || "").toLowerCase(); if (s.includes("startup")) return C.amber; if (s.includes("scale")) return C.green; if (s.includes("growth")) return C.teal; if (s.includes("public") || s.includes("enterprise")) return C.violet; return C.dim; }
+function Logo({ domain, name, size = 40 }) {
+  const d = String(domain || "").replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/\/.*$/, "").trim();
+  const srcs = d ? [`https://logo.clearbit.com/${d}`, `https://www.google.com/s2/favicons?domain=${d}&sz=128`] : [];
+  const [i, setI] = useState(0);
+  const initial = ((String(name || "?").trim()[0]) || "?").toUpperCase();
+  if (!srcs.length || i >= srcs.length) return <div style={{ width: size, height: size, borderRadius: 9, flexShrink: 0, display: "grid", placeItems: "center", background: GRAD, color: "#fff", fontFamily: SERIF, fontWeight: 800, fontSize: Math.round(size * 0.42) }}>{initial}</div>;
+  return <div style={{ width: size, height: size, borderRadius: 9, flexShrink: 0, overflow: "hidden", background: "#fff", border: `1px solid ${C.line}`, display: "grid", placeItems: "center" }}><img src={srcs[i]} alt={name} onError={() => setI(i + 1)} style={{ width: "100%", height: "100%", objectFit: "contain" }} /></div>;
+}
 const daysOpen = (ts) => ts ? Math.max(0, Math.floor((Date.now() - ts) / 86400000)) : 0;
 const agoLabel = (ts) => { const d = daysOpen(ts); return d === 0 ? "today" : d + "d ago"; };
 const fmtDate = (ts) => ts ? new Date(ts).toLocaleDateString(undefined, { day: "2-digit", month: "short" }) : "";
@@ -272,9 +281,11 @@ CRITERIA
 ROLES TO SCORE:
 ${roles.map((r) => `${r.n}. ${r.title} — ${r.company} (${r.location || "location n/a"})`).join("\n")}
 
-For each role return "n" (its number), "score" (integer 0-100 fit). Judge fit PRIMARILY on: title & seniority match, role type (leadership vs IC), target-market/work-location compatibility, industry/company-type fit, and the wanted role characteristics. A role at a company in the right industry should score on its own merits even if the company is unknown to the candidate — finding strong roles at new companies is a core goal. Being on the focus-companies list is only a moderate bonus on top; being absent from it is NOT a penalty. Calibrate honestly: 85-100 excellent, 65-84 good, 40-64 partial, below 40 weak; do not inflate. Also return "fit" (under 10 words on why), "signal" (under 6 words). Score ONLY the roles listed; never invent roles.
+For each role return "n" (its number), "score" (integer 0-100 fit). Judge fit PRIMARILY on: title & seniority match, role type (leadership vs IC), target-market/work-location compatibility, industry/company-type fit, and the wanted role characteristics. A role at a company in the right industry should score on its own merits even if the company is unknown to the candidate — finding strong roles at new companies is a core goal. Being on the focus-companies list is only a moderate bonus on top; being absent from it is NOT a penalty. Calibrate honestly: 85-100 excellent, 65-84 good, 40-64 partial, below 40 weak; do not inflate. Also return "fit" (under 10 words on why), "signal" (under 6 words).
+Also return "co" — a compact company snapshot from your own knowledge to help fast evaluation. Fields: "type" (one of: Startup, Scale-up, Growth, Enterprise, Public), "industry" (1-3 words), "hq" ("City, Country"), "size" (employee band, e.g. "50-200", "1k-5k", "10k+"), "founded" (year), "funding" (very short ownership/funding note, e.g. "Series C", "Public NASDAQ:DDOG", "Bootstrapped"), "domain" (primary website domain like "datadog.com"). CRITICAL: only fill a field if you are reasonably confident; if unsure leave it as "" (empty). Do NOT guess revenue or fabricate numbers.
+Score ONLY the roles listed; never invent roles.
 
-Respond with ONLY a compact minified JSON array: [{"n":1,"score":0,"fit":"","signal":""}]`;
+Respond with ONLY a compact minified JSON array: [{"n":1,"score":0,"fit":"","signal":"","co":{"type":"","industry":"","hq":"","size":"","founded":"","funding":"","domain":""}}]`;
 
 const buildResearchPrompt = (profile, company, title, location) => `You are Company Sonar. Research this company and map the candidate's three-persona ICP for one role.
 
@@ -547,7 +558,12 @@ function Tool({ signedInEmail, onSignOut }) {
         const o = byN[c.n];
         if (!o) return r;
         const sc = Number.isFinite(+o.score) ? Math.max(0, Math.min(100, Math.round(+o.score))) : r.score;
-        return { ...r, score: sc, fit: o.fit || r.fit, signal: o.signal || r.signal };
+        const aiCo = (o.co && typeof o.co === "object") ? o.co : {};
+        const realCo = r.co || {};
+        const mergedCo = { ...aiCo };
+        Object.keys(realCo).forEach((k) => { if (realCo[k]) mergedCo[k] = realCo[k]; }); // real (TheirStack) wins
+        const co = Object.values(mergedCo).some(Boolean) ? mergedCo : r.co;
+        return { ...r, score: sc, fit: o.fit || r.fit, signal: o.signal || r.signal, co };
       });
       setFound(working); saveKey("cs_found", working);
     }
@@ -585,7 +601,7 @@ function Tool({ signedInEmail, onSignOut }) {
       for (const j of (Array.isArray(data.jobs) ? data.jobs : [])) {
         if (!j.company || !j.title) continue;
         const k = roleKey(j); if (seen.has(k)) continue; seen.add(k);
-        fresh.push({ id: Date.now() + "" + Math.random().toString(36).slice(2, 6), company: j.company, title: j.title, location: j.location || "", link: j.link || "", source: j.source || "Radar", fit: "", signal: "", posted: j.posted || "", score: null, foundAt: Date.now(), radar: true });
+        fresh.push({ id: Date.now() + "" + Math.random().toString(36).slice(2, 6), company: j.company, title: j.title, location: j.location || "", link: j.link || "", source: j.source || "Radar", fit: "", signal: "", posted: j.posted || "", score: null, foundAt: Date.now(), radar: true, co: j.co || undefined });
       }
 
       // 2) focus companies (free ATS pull) — strict radius + title relevance, capped
@@ -1093,11 +1109,16 @@ function Sonar({ found, ready, runRadar, radaring, scoreRoles, scoring, clearFou
           return (
             <div key={r.id} style={{ border: `1px solid ${C.line}`, borderRadius: 10, background: C.panel, overflow: "hidden", opacity: (r.outdated || r.dismissed) ? .55 : 1 }}>
               <div style={{ padding: 16, display: "flex", justifyContent: "space-between", gap: 16 }}>
-                <div style={{ flex: 1 }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 4, flexWrap: "wrap" }}><ScoreBadge score={r.score} /><span style={{ fontSize: 16, fontWeight: 600, fontFamily: SERIF }}>{r.title}</span><span style={{ color: C.dim, fontSize: 13 }}>· {r.company}</span>{r.dismissed && <Tag color={C.faint} text="DISMISSED" />}{r.outdated && !r.dismissed && <Tag color={C.faint} text="OUTDATED" />}<VerifyBadge verify={r.verify} checking={verifyBusy[r.id]} /></div>
-                  <div style={{ fontFamily: MONO, fontSize: 11, color: C.dim, marginBottom: 8 }}>{r.location}{r.posted ? " · posted " + r.posted : ""}{r.source ? " · via " + r.source : ""} · found {agoLabel(r.foundAt)}</div>
-                  <div style={{ fontSize: 13, color: C.text, lineHeight: 1.5, marginBottom: r.signal ? 8 : 0 }}>{r.fit}</div>
-                  {r.signal && <Tag color={C.amber} text={"SIGNAL · " + r.signal} />}
+                <div style={{ flex: 1, display: "flex", gap: 12, minWidth: 0 }}>
+                  <Logo domain={r.co && r.co.domain} name={r.company} size={42} />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 3 }}><span style={{ fontSize: 17, fontWeight: 800, fontFamily: SERIF, letterSpacing: -.3 }}>{r.company}</span>{r.co && r.co.type && <Tag color={stageColor(r.co.type)} text={r.co.type} />}{r.dismissed && <Tag color={C.faint} text="DISMISSED" />}{r.outdated && !r.dismissed && <Tag color={C.faint} text="OUTDATED" />}<VerifyBadge verify={r.verify} checking={verifyBusy[r.id]} /></div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 6, flexWrap: "wrap" }}><ScoreBadge score={r.score} /><span style={{ fontSize: 14.5, fontWeight: 600, fontFamily: SERIF, color: C.text }}>{r.title}</span></div>
+                    <div style={{ fontFamily: MONO, fontSize: 11, color: C.dim, marginBottom: r.co && (r.co.industry || r.co.size || r.co.hq || r.co.founded || r.co.funding) ? 5 : 8 }}>{r.location}{r.posted ? " · posted " + r.posted : ""}{r.source ? " · via " + r.source : ""} · found {agoLabel(r.foundAt)}</div>
+                    {r.co && (r.co.industry || r.co.size || r.co.hq || r.co.founded || r.co.funding) && <div style={{ fontFamily: MONO, fontSize: 10.5, color: C.dim, marginBottom: 8, lineHeight: 1.5 }}>{[r.co.industry, r.co.size && (r.co.size + " emp"), r.co.hq && ("HQ " + r.co.hq), r.co.founded && ("est. " + r.co.founded), r.co.funding].filter(Boolean).join("  ·  ")}</div>}
+                    <div style={{ fontSize: 13, color: C.text, lineHeight: 1.5, marginBottom: r.signal ? 8 : 0 }}>{r.fit}</div>
+                    {r.signal && <Tag color={C.amber} text={"SIGNAL · " + r.signal} />}
+                  </div>
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 8, alignItems: "stretch", minWidth: 168 }}>
                   <button onClick={() => add(r)} style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 7, padding: "10px 14px", borderRadius: 9, cursor: "pointer", whiteSpace: "nowrap", border: `1px solid ${added ? C.line : C.green}`, background: added ? "transparent" : "rgba(16,185,129,.10)", color: added ? C.dim : C.green, fontFamily: MONO, fontSize: 11, fontWeight: 700, letterSpacing: .3 }}>{added ? <Check size={14} /> : <Plus size={14} />} {added ? "IN COCKPIT" : "ADD TO COCKPIT"}</button>
