@@ -1027,13 +1027,12 @@ function Sonar({ found, ready, runRadar, radaring, scoreRoles, scoring, clearFou
   const [locSel, setLocSel] = useState([]);
   const [recency, setRecency] = useState("all");
   const [sort, setSort] = useState("score");
-  const [hideAdded, setHideAdded] = useState(false);
   const [showOutdated, setShowOutdated] = useState(false);
   const [liveOnly, setLiveOnly] = useState(false);
   if (!ready) return <Empty icon={SlidersHorizontal} title="Set your Search Criteria first" desc="Role Sonar needs at least a target title to scan the market." action="Go to Search Criteria" onClick={goCriteria} />;
 
   const inCockpit = (r) => pipeline.some((t) => t.company === r.company && t.title === r.title);
-  const hiddenCount = found.filter((r) => r.outdated || r.dismissed).length;
+  const hiddenCount = found.filter((r) => r.outdated || r.dismissed || inCockpit(r)).length;
   const activeCount = found.length - hiddenCount;
   const liveCount = found.filter((r) => r.verify?.status === "open").length;
   const countryCounts = {}; let remoteBucketN = 0;
@@ -1042,11 +1041,10 @@ function Sonar({ found, ready, runRadar, radaring, scoreRoles, scoring, clearFou
   let list = found.filter((r) => {
     if (workMode === "Remote only" && /hybrid|on-?site|in[- ]?office/i.test(r.location || "")) return false;
     if (liveOnly && r.verify?.status !== "open") return false;
-    if (!showOutdated && (r.outdated || r.dismissed)) return false;
+    if (!showOutdated && (r.outdated || r.dismissed || inCockpit(r))) return false;
     if (minScore && (r.score == null || r.score < minScore)) return false;
     if (locSel.length) { const rc = roleCountries(r.location); const inRemote = locSel.includes(REMOTE_BUCKET) && !rc.length; if (!inRemote && !rc.some((c) => locSel.includes(c))) return false; }
     if (recency !== "all") { const d = daysOpen(r.foundAt); if (recency === "today" && d > 0) return false; if (recency === "week" && d > 7) return false; }
-    if (hideAdded && inCockpit(r)) return false;
     return true;
   });
   list = [...list].sort((a, b) => sort === "score" ? ((b.score || 0) - (a.score || 0)) : ((b.foundAt || 0) - (a.foundAt || 0)));
@@ -1080,7 +1078,6 @@ function Sonar({ found, ready, runRadar, radaring, scoreRoles, scoring, clearFou
           <div style={{ display: "flex", gap: 6, alignItems: "center" }}><span style={{ fontFamily: MONO, fontSize: 10, color: C.faint }}>SCORE</span>{[[0, "ALL"], [60, "60+"], [75, "75+"], [85, "85+"]].map(([v, l]) => <Pill key={v} active={minScore === v} onClick={() => setMin(v)} color={C.green}>{l}</Pill>)}</div>
           <div style={{ display: "flex", gap: 6, alignItems: "center" }}><span style={{ fontFamily: MONO, fontSize: 10, color: C.faint }}>FOUND</span>{[["all", "ANY"], ["week", "≤7d"], ["today", "TODAY"]].map(([v, l]) => <Pill key={v} active={recency === v} onClick={() => setRecency(v)} color={C.violet}>{l}</Pill>)}</div>
           {(countryOpts.length > 0 || remoteBucketN > 0) && <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}><span style={{ fontFamily: MONO, fontSize: 10, color: C.faint }}>LOCATION</span><Pill active={locSel.length === 0} onClick={() => setLocSel([])} color={C.teal}>ALL</Pill>{countryOpts.map((c) => <Pill key={c} active={locSel.includes(c)} onClick={() => setLocSel(locSel.includes(c) ? locSel.filter((x) => x !== c) : [...locSel, c])} color={C.teal}>{c}{countryCounts[c] ? " (" + countryCounts[c] + ")" : ""}</Pill>)}{remoteBucketN > 0 && <Pill active={locSel.includes(REMOTE_BUCKET)} onClick={() => setLocSel(locSel.includes(REMOTE_BUCKET) ? locSel.filter((x) => x !== REMOTE_BUCKET) : [...locSel, REMOTE_BUCKET])} color={C.teal}>{REMOTE_BUCKET} ({remoteBucketN})</Pill>}</div>}
-          <label style={{ display: "inline-flex", gap: 6, alignItems: "center", fontFamily: MONO, fontSize: 10.5, color: C.dim, cursor: "pointer" }}><input type="checkbox" checked={hideAdded} onChange={(e) => setHideAdded(e.target.checked)} /> hide added</label>
           <Pill active={liveOnly} onClick={() => setLiveOnly(!liveOnly)} color={C.green}>✓ LIVE ONLY{liveCount ? " (" + liveCount + ")" : ""}</Pill>
           {hiddenCount > 0 && <Pill active={showOutdated} onClick={() => setShowOutdated(!showOutdated)} color={C.faint}>{showOutdated ? "HIDE" : "SHOW"} HANDLED ({hiddenCount})</Pill>}
           <span style={{ marginLeft: "auto", fontFamily: MONO, fontSize: 10.5, color: C.faint }}>{list.length} shown{activeCount - list.length > 0 ? ` · ${activeCount - list.length} filtered` : ""}{hiddenCount ? ` · ${hiddenCount} handled` : ""}</span>
