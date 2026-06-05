@@ -152,6 +152,10 @@ function titleRelevant(title, useTitles) {
   const sr = /(head of|director|\bvp\b|vice president|chief|\bcro\b|\bcso\b|country manager|general manager|\bgm\b|managing director|sales lead|regional lead)/;
   return fn.test(t) && sr.test(t);
 }
+// Map ISO codes -> display country names, and derive the country/countries of a role's location.
+const CODE2NAME = { ES: "Spain", GB: "UK", IE: "Ireland", DE: "Germany", FR: "France", NL: "Netherlands", PT: "Portugal", IT: "Italy", SE: "Sweden", DK: "Denmark", NO: "Norway", FI: "Finland", PL: "Poland", CH: "Switzerland", AT: "Austria", BE: "Belgium", US: "United States", CA: "Canada", IN: "India", AU: "Australia", SG: "Singapore", MX: "Mexico", BR: "Brazil", AE: "UAE", SA: "Saudi Arabia", QA: "Qatar" };
+const REMOTE_BUCKET = "Remote / multi-region";
+function roleCountries(loc) { const out = []; for (const c of _jobCodes(loc)) out.push(CODE2NAME[c] || c); return Array.from(new Set(out)); }
 const daysOpen = (ts) => ts ? Math.max(0, Math.floor((Date.now() - ts) / 86400000)) : 0;
 const agoLabel = (ts) => { const d = daysOpen(ts); return d === 0 ? "today" : d + "d ago"; };
 const fmtDate = (ts) => ts ? new Date(ts).toLocaleDateString(undefined, { day: "2-digit", month: "short" }) : "";
@@ -527,7 +531,7 @@ function Tool({ signedInEmail, onSignOut }) {
 
   async function scoreWorking(startWorking) {
     let working = startWorking;
-    const targets = working.filter((r) => !r.outdated && r.score == null);
+    const targets = working.filter((r) => !r.outdated && !r.dismissed && r.score == null);
     if (!targets.length) return working;
     const size = 12;
     const scoreCriteria = { ...criteria, exampleCompanies: library.length ? library.map((c) => c.company) : criteria.exampleCompanies };
@@ -613,7 +617,7 @@ function Tool({ signedInEmail, onSignOut }) {
   }
 
   async function scoreRoles() {
-    const targets = found.filter((r) => !r.outdated && r.score == null);
+    const targets = found.filter((r) => !r.outdated && !r.dismissed && r.score == null);
     if (!targets.length) { setErr("No unscored roles — everything's already scored."); return; }
     setErr(""); setScoring(true);
     try { await scoreWorking([...found]); } catch (e) { setErr("Scoring failed: " + e.message); }
@@ -626,7 +630,7 @@ function Tool({ signedInEmail, onSignOut }) {
     catch (e) { setErr("ICP mapping failed: " + e.message); }
     setRoleBusy((b) => ({ ...b, [id]: false }));
   }
-  function removeFound(id) { const next = found.filter((x) => x.id !== id); setFound(next); saveKey("cs_found", next); }
+  function removeFound(id) { const next = found.map((x) => x.id === id ? { ...x, dismissed: true } : x); setFound(next); saveKey("cs_found", next); }
   function clearHistory() { setFound([]); saveKey("cs_found", []); }
 
   function addToPipeline(role) {
@@ -666,14 +670,14 @@ function Tool({ signedInEmail, onSignOut }) {
     const np = pipeline.filter((x) => x.id !== t.id); persistPipeline(np);
     if (selId === t.id) setSelId(np.find((x) => !x.applied)?.id || null);
   }
-  function restoreFound(id) { const merged = found.map((x) => x.id === id ? { ...x, outdated: false } : x); setFound(merged); saveKey("cs_found", merged); }
+  function restoreFound(id) { const merged = found.map((x) => x.id === id ? { ...x, outdated: false, dismissed: false } : x); setFound(merged); saveKey("cs_found", merged); }
 
   const sel = openTargets.find((t) => t.id === selId) || null;
   const TABS = [
     ["profile", "01 · My Profile", User],
     ["criteria", "02 · Search Criteria", SlidersHorizontal],
     ["companies", `03 · Companies${library.length ? " (" + library.length + ")" : ""}`, Building2],
-    ["sonar", `04 · Role Sonar${found.filter((f) => !f.outdated).length ? " (" + found.filter((f) => !f.outdated).length + ")" : ""}`, Search],
+    ["sonar", `04 · Role Sonar${found.filter((f) => !f.outdated && !f.dismissed).length ? " (" + found.filter((f) => !f.outdated && !f.dismissed).length + ")" : ""}`, Search],
     ["pipeline", `05 · Cockpit${openTargets.length ? " (" + openTargets.length + ")" : ""}`, Target],
     ["tracker", `06 · Tracker${appliedTargets.length ? " (" + appliedTargets.length + ")" : ""}`, ClipboardList],
     ["settings", "07 · Settings", Cog],
@@ -1018,9 +1022,9 @@ function Pill({ active, onClick, children, color = C.teal }) {
   return <button onClick={onClick} style={{ padding: "5px 10px", borderRadius: 7, cursor: "pointer", fontFamily: MONO, fontSize: 10.5, letterSpacing: .3, border: `1px solid ${active ? color : C.line}`, background: active ? C.panel2 : "transparent", color: active ? color : C.dim }}>{children}</button>;
 }
 function Sonar({ found, ready, runRadar, radaring, scoreRoles, scoring, clearFound, scanStatus, lastScan, lastFresh, add, removeFound, verifyFound, verifyBusy, restoreFound, workMode, pipeline, goCriteria, goSettings }) {
-  const unscored = found.filter((r) => !r.outdated && r.score == null).length;
+  const unscored = found.filter((r) => !r.outdated && !r.dismissed && r.score == null).length;
   const [minScore, setMin] = useState(0);
-  const [loc, setLoc] = useState("all");
+  const [locSel, setLocSel] = useState([]);
   const [recency, setRecency] = useState("all");
   const [sort, setSort] = useState("score");
   const [hideAdded, setHideAdded] = useState(false);
@@ -1029,16 +1033,18 @@ function Sonar({ found, ready, runRadar, radaring, scoreRoles, scoring, clearFou
   if (!ready) return <Empty icon={SlidersHorizontal} title="Set your Search Criteria first" desc="Role Sonar needs at least a target title to scan the market." action="Go to Search Criteria" onClick={goCriteria} />;
 
   const inCockpit = (r) => pipeline.some((t) => t.company === r.company && t.title === r.title);
-  const outdatedCount = found.filter((r) => r.outdated).length;
-  const activeCount = found.length - outdatedCount;
+  const hiddenCount = found.filter((r) => r.outdated || r.dismissed).length;
+  const activeCount = found.length - hiddenCount;
   const liveCount = found.filter((r) => r.verify?.status === "open").length;
-  const locations = ["all", ...Array.from(new Set(found.map((f) => f.location).filter(Boolean)))];
+  const countryCounts = {}; let remoteBucketN = 0;
+  found.forEach((f) => { if (f.outdated || f.dismissed) return; const cs = roleCountries(f.location); if (!cs.length) remoteBucketN++; else cs.forEach((c) => { countryCounts[c] = (countryCounts[c] || 0) + 1; }); });
+  const countryOpts = Object.keys(countryCounts).sort((a, b) => countryCounts[b] - countryCounts[a] || a.localeCompare(b));
   let list = found.filter((r) => {
     if (workMode === "Remote only" && /hybrid|on-?site|in[- ]?office/i.test(r.location || "")) return false;
     if (liveOnly && r.verify?.status !== "open") return false;
-    if (!showOutdated && r.outdated) return false;
+    if (!showOutdated && (r.outdated || r.dismissed)) return false;
     if (minScore && (r.score == null || r.score < minScore)) return false;
-    if (loc !== "all" && r.location !== loc) return false;
+    if (locSel.length) { const rc = roleCountries(r.location); const inRemote = locSel.includes(REMOTE_BUCKET) && !rc.length; if (!inRemote && !rc.some((c) => locSel.includes(c))) return false; }
     if (recency !== "all") { const d = daysOpen(r.foundAt); if (recency === "today" && d > 0) return false; if (recency === "week" && d > 7) return false; }
     if (hideAdded && inCockpit(r)) return false;
     return true;
@@ -1073,25 +1079,25 @@ function Sonar({ found, ready, runRadar, radaring, scoreRoles, scoring, clearFou
           <div style={{ display: "flex", gap: 6, alignItems: "center" }}><span style={{ fontFamily: MONO, fontSize: 10, color: C.faint }}>SORT</span><Pill active={sort === "score"} onClick={() => setSort("score")}>BEST MATCH</Pill><Pill active={sort === "new"} onClick={() => setSort("new")}>NEWEST</Pill></div>
           <div style={{ display: "flex", gap: 6, alignItems: "center" }}><span style={{ fontFamily: MONO, fontSize: 10, color: C.faint }}>SCORE</span>{[[0, "ALL"], [60, "60+"], [75, "75+"], [85, "85+"]].map(([v, l]) => <Pill key={v} active={minScore === v} onClick={() => setMin(v)} color={C.green}>{l}</Pill>)}</div>
           <div style={{ display: "flex", gap: 6, alignItems: "center" }}><span style={{ fontFamily: MONO, fontSize: 10, color: C.faint }}>FOUND</span>{[["all", "ANY"], ["week", "≤7d"], ["today", "TODAY"]].map(([v, l]) => <Pill key={v} active={recency === v} onClick={() => setRecency(v)} color={C.violet}>{l}</Pill>)}</div>
-          {locations.length > 1 && <select className="cs-sel" value={loc} onChange={(e) => setLoc(e.target.value)} style={{ background: C.bg, color: C.text, border: `1px solid ${C.line}`, borderRadius: 7, padding: "6px 10px", fontFamily: MONO, fontSize: 10.5, outline: "none", cursor: "pointer", maxWidth: 200 }}>{locations.map((l) => <option key={l} value={l} style={{ background: C.bg }}>{l === "all" ? "ALL LOCATIONS" : l}</option>)}</select>}
+          {(countryOpts.length > 0 || remoteBucketN > 0) && <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}><span style={{ fontFamily: MONO, fontSize: 10, color: C.faint }}>LOCATION</span><Pill active={locSel.length === 0} onClick={() => setLocSel([])} color={C.teal}>ALL</Pill>{countryOpts.map((c) => <Pill key={c} active={locSel.includes(c)} onClick={() => setLocSel(locSel.includes(c) ? locSel.filter((x) => x !== c) : [...locSel, c])} color={C.teal}>{c}{countryCounts[c] ? " (" + countryCounts[c] + ")" : ""}</Pill>)}{remoteBucketN > 0 && <Pill active={locSel.includes(REMOTE_BUCKET)} onClick={() => setLocSel(locSel.includes(REMOTE_BUCKET) ? locSel.filter((x) => x !== REMOTE_BUCKET) : [...locSel, REMOTE_BUCKET])} color={C.teal}>{REMOTE_BUCKET} ({remoteBucketN})</Pill>}</div>}
           <label style={{ display: "inline-flex", gap: 6, alignItems: "center", fontFamily: MONO, fontSize: 10.5, color: C.dim, cursor: "pointer" }}><input type="checkbox" checked={hideAdded} onChange={(e) => setHideAdded(e.target.checked)} /> hide added</label>
           <Pill active={liveOnly} onClick={() => setLiveOnly(!liveOnly)} color={C.green}>✓ LIVE ONLY{liveCount ? " (" + liveCount + ")" : ""}</Pill>
-          {outdatedCount > 0 && <Pill active={showOutdated} onClick={() => setShowOutdated(!showOutdated)} color={C.faint}>{showOutdated ? "HIDE" : "SHOW"} OUTDATED ({outdatedCount})</Pill>}
-          <span style={{ marginLeft: "auto", fontFamily: MONO, fontSize: 10.5, color: C.faint }}>{list.length} shown{activeCount - list.length > 0 ? ` · ${activeCount - list.length} filtered` : ""}{outdatedCount ? ` · ${outdatedCount} outdated` : ""}</span>
+          {hiddenCount > 0 && <Pill active={showOutdated} onClick={() => setShowOutdated(!showOutdated)} color={C.faint}>{showOutdated ? "HIDE" : "SHOW"} HANDLED ({hiddenCount})</Pill>}
+          <span style={{ marginLeft: "auto", fontFamily: MONO, fontSize: 10.5, color: C.faint }}>{list.length} shown{activeCount - list.length > 0 ? ` · ${activeCount - list.length} filtered` : ""}{hiddenCount ? ` · ${hiddenCount} handled` : ""}</span>
         </div>
       )}
 
       {found.length === 0 && !radaring && <p style={{ fontFamily: MONO, fontSize: 12, color: C.dim }}>No roles yet — hit “Run Radar &amp; Score” to run your first scan.</p>}
-      {found.length > 0 && list.length === 0 && !radaring && <p style={{ fontFamily: MONO, fontSize: 12, color: C.dim }}>All current roles are filtered out — loosen the filters above{outdatedCount ? `, or “show outdated (${outdatedCount})”` : ""}.</p>}
+      {found.length > 0 && list.length === 0 && !radaring && <p style={{ fontFamily: MONO, fontSize: 12, color: C.dim }}>All current roles are filtered out — loosen the filters above{hiddenCount ? `, or “show handled (${hiddenCount})”` : ""}.</p>}
 
       <div style={{ display: "grid", gap: 12 }}>
         {list.map((r) => {
           const added = inCockpit(r); const mapped = !!r.research;
           return (
-            <div key={r.id} style={{ border: `1px solid ${C.line}`, borderRadius: 10, background: C.panel, overflow: "hidden", opacity: r.outdated ? .55 : 1 }}>
+            <div key={r.id} style={{ border: `1px solid ${C.line}`, borderRadius: 10, background: C.panel, overflow: "hidden", opacity: (r.outdated || r.dismissed) ? .55 : 1 }}>
               <div style={{ padding: 16, display: "flex", justifyContent: "space-between", gap: 16 }}>
                 <div style={{ flex: 1 }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 4, flexWrap: "wrap" }}><ScoreBadge score={r.score} /><span style={{ fontSize: 16, fontWeight: 600, fontFamily: SERIF }}>{r.title}</span><span style={{ color: C.dim, fontSize: 13 }}>· {r.company}</span>{r.outdated && <Tag color={C.faint} text="OUTDATED" />}<VerifyBadge verify={r.verify} checking={verifyBusy[r.id]} /></div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 4, flexWrap: "wrap" }}><ScoreBadge score={r.score} /><span style={{ fontSize: 16, fontWeight: 600, fontFamily: SERIF }}>{r.title}</span><span style={{ color: C.dim, fontSize: 13 }}>· {r.company}</span>{r.dismissed && <Tag color={C.faint} text="DISMISSED" />}{r.outdated && !r.dismissed && <Tag color={C.faint} text="OUTDATED" />}<VerifyBadge verify={r.verify} checking={verifyBusy[r.id]} /></div>
                   <div style={{ fontFamily: MONO, fontSize: 11, color: C.dim, marginBottom: 8 }}>{r.location}{r.posted ? " · posted " + r.posted : ""}{r.source ? " · via " + r.source : ""} · found {agoLabel(r.foundAt)}</div>
                   <div style={{ fontSize: 13, color: C.text, lineHeight: 1.5, marginBottom: r.signal ? 8 : 0 }}>{r.fit}</div>
                   {r.signal && <Tag color={C.amber} text={"SIGNAL · " + r.signal} />}
@@ -1101,9 +1107,9 @@ function Sonar({ found, ready, runRadar, radaring, scoreRoles, scoring, clearFou
                   <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
                     <button onClick={() => verifyFound(r.id)} disabled={verifyBusy[r.id]} title="check if still live" style={{ display: "inline-flex", alignItems: "center", gap: 5, background: "transparent", border: "none", cursor: verifyBusy[r.id] ? "default" : "pointer", color: C.dim, fontFamily: MONO, fontSize: 11, padding: 0 }}>{verifyBusy[r.id] ? <Spin /> : <RefreshCw size={12} />} verify</button>
                     {r.link && <a href={r.link} target="_blank" rel="noreferrer" style={{ display: "inline-flex", alignItems: "center", gap: 5, fontFamily: MONO, fontSize: 11, color: C.dim, textDecoration: "none" }}><ExternalLink size={12} /> posting</a>}
-                    {r.outdated
-                      ? <button onClick={() => restoreFound(r.id)} title="restore" style={{ background: "transparent", border: "none", cursor: "pointer", color: C.faint, padding: 0, display: "flex" }}><Undo2 size={14} /></button>
-                      : <button onClick={() => removeFound(r.id)} title="dismiss" style={{ background: "transparent", border: "none", cursor: "pointer", color: C.faint, padding: 0, display: "flex" }}><X size={14} /></button>}
+                    {(r.outdated || r.dismissed)
+                      ? <button onClick={() => restoreFound(r.id)} title="restore to list" style={{ background: "transparent", border: "none", cursor: "pointer", color: C.faint, padding: 0, display: "flex" }}><Undo2 size={14} /></button>
+                      : <button onClick={() => removeFound(r.id)} title="not interesting — dismiss (won't come back)" style={{ background: "transparent", border: "none", cursor: "pointer", color: C.faint, padding: 0, display: "flex" }}><X size={14} /></button>}
                   </div>
                 </div>
               </div>
@@ -1147,7 +1153,7 @@ function Cockpit({ targets, sel, setSelId, remove, research, draft, busy, patch,
           <div style={{ marginTop: 18, borderTop: `1px solid ${C.line}`, paddingTop: 16, display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
             <button onClick={() => markApplied(sel.id)} style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "12px 20px", borderRadius: 10, cursor: "pointer", border: "none", background: C.green, color: "#fff", fontFamily: MONO, fontSize: 12.5, letterSpacing: .4, fontWeight: 700, boxShadow: "0 6px 18px rgba(16,185,129,.34)" }}><Send size={14} /> MARK AS APPLIED</button>
             <button onClick={() => markOutdated(sel)} title="role no longer online — remove and stop it resurfacing" style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "11px 16px", borderRadius: 8, cursor: "pointer", border: `1px solid ${C.line}`, background: "transparent", color: C.dim, fontFamily: MONO, fontSize: 11.5, letterSpacing: .5 }}><X size={14} /> MARK OUTDATED</button>
-            <span style={{ fontFamily: MONO, fontSize: 10.5, color: C.faint }}>applied → Tracker · outdated → removed & won't resurface</span>
+            <span style={{ fontFamily: MONO, fontSize: 10.5, color: C.faint }}>dismissed &amp; in-cockpit roles leave the list and won't resurface on the next scan</span>
           </div>
         </div>
       )}
