@@ -30,7 +30,7 @@ function isBroadRemote(locStr) {
   return /\b(emea|europe|european|eu wide|eu-wide|eea|pan[- ]?europe|global|worldwide|world wide|anywhere|international|remote first|remote-first)\b/i.test(locStr);
 }
 
-async function runSearch({ key, titles, countries, homeCountries, broadRemote, patterns, maxAge, limit }) {
+async function runSearch({ key, titles, countries, homeCountries, broadRemote, patterns, maxAge, limit, companyDomains, companyNames }) {
   const payload = {
     posted_at_max_age_days: maxAge > 0 ? maxAge : 30,
     order_by: [{ field: "date_posted", desc: true }],
@@ -40,6 +40,8 @@ async function runSearch({ key, titles, countries, homeCountries, broadRemote, p
   if (titles && titles.length) payload.job_title_or = titles;
   if (countries && countries.length) payload.job_country_code_or = countries.map((c) => String(c).toUpperCase());
   if (patterns && patterns.length) payload.company_description_pattern_or = patterns;
+  if (companyDomains && companyDomains.length) payload.company_domain_or = companyDomains.slice(0, 200);
+  if (companyNames && companyNames.length) payload.company_name_or = companyNames.slice(0, 200);
 
   const r = await fetch("https://api.theirstack.com/v1/jobs/search", {
     method: "POST",
@@ -115,9 +117,9 @@ export default async function handler(req, res) {
       const patterns = q.pattern ? [].concat(q.pattern) : [];
       const maxAge = Number(q.days) || 30;
       const limit = Math.min(Number(q.limit) || 5, 25);
-      if (!titles.length && !countries.length) { res.status(200).json({ ok: true, v: 7, hint: "test with ?title=Head of Sales&country=ES&days=30&limit=5" }); return; }
+      if (!titles.length && !countries.length) { res.status(200).json({ ok: true, v: 8, hint: "test with ?title=Head of Sales&country=ES&days=30&limit=5" }); return; }
       const out = await runSearch({ key, titles, countries, patterns, maxAge, limit });
-      res.status(200).json({ v: 7, count: out.jobs.length, total: out.total, returned: out.returned, jobs: out.jobs, _debug: out._debug });
+      res.status(200).json({ v: 8, count: out.jobs.length, total: out.total, returned: out.returned, jobs: out.jobs, _debug: out._debug });
       return;
     }
 
@@ -128,8 +130,10 @@ export default async function handler(req, res) {
       const patterns = Array.isArray(body.descriptionPatterns) ? body.descriptionPatterns.filter(Boolean) : [];
       const homeCountries = Array.isArray(body.homeCountries) ? body.homeCountries.filter(Boolean) : [];
       const broadRemote = !!body.broadRemote;
-      const out = await runSearch({ key, titles, countries, homeCountries, broadRemote, patterns, maxAge: Number(body.maxAgeDays) || 30, limit: Number(body.limit) || 25 });
-      res.status(200).json({ v: 7, count: out.jobs.length, total: out.total, returned: out.returned, jobs: out.jobs });
+      const companyDomains = Array.isArray(body.companyDomains) ? body.companyDomains.filter(Boolean) : [];
+      const companyNames = Array.isArray(body.companyNames) ? body.companyNames.filter(Boolean) : [];
+      const out = await runSearch({ key, titles, countries, homeCountries, broadRemote, patterns, maxAge: Number(body.maxAgeDays) || 30, limit: Number(body.limit) || 25, companyDomains, companyNames });
+      res.status(200).json({ v: 8, count: out.jobs.length, total: out.total, returned: out.returned, jobs: out.jobs });
       return;
     }
 
