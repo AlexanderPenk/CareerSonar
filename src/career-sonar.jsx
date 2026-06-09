@@ -407,6 +407,7 @@ function Tool({ signedInEmail, onSignOut }) {
   const [loadingRoles, setLoadingRoles] = useState(false);
   const [roleBusy, setRoleBusy] = useState({});
   const [lastFresh, setLastFresh] = useState(null);
+  const [focusStats, setFocusStats] = useState(null);
   const [scanStatus, setScanStatus] = useState("");
 
   const [pipeline, setPipeline] = useState([]);
@@ -650,23 +651,26 @@ function Tool({ signedInEmail, onSignOut }) {
         fresh.push({ id: Date.now() + "" + Math.random().toString(36).slice(2, 6), company: j.company, title: j.title, location: j.location || "", link: j.link || "", source: j.source || "Radar", fit: "", signal: "", posted: j.posted || "", score: null, foundAt: Date.now(), radar: true, co: j.co || undefined });
       }
 
-      // 2) focus companies (free ATS pull) — strict radius + title relevance, capped
+      // 2) focus companies (free ATS pull) — lenient radius (you chose them) + leadership-title relevance, with diagnostics
       if (watchlist.length) {
         setScanStatus("pulling roles from your focus companies…");
+        let raw = 0, locOk = 0, added = 0, pullErr = "";
         try {
           const atsJobs = await pullWatchlistJobs();
-          let added = 0;
+          raw = atsJobs.length;
           for (const j of atsJobs) {
-            if (added >= 80) break;
             if (!j.company || !j.title) continue;
-            if (!inRadiusStrict(j.location, homeCountries, broadRemote)) continue;
+            if (!inRadius(j.location, homeCountries, broadRemote)) continue;
+            locOk++;
             if (!titleRelevant(j.title, useTitles)) continue;
+            if (added >= 120) continue;
             const k = roleKey(j); if (seen.has(k)) continue; seen.add(k);
             fresh.push({ id: Date.now() + "" + Math.random().toString(36).slice(2, 6), company: j.company, title: j.title, location: j.location || "", link: j.link || "", source: j.source || "", fit: "", signal: "", posted: j.posted || "", score: null, foundAt: Date.now(), live: true, verify: { status: "open", note: "From your focus company's live feed" } });
             added++;
           }
-        } catch (e) { /* radar already succeeded — ignore ATS errors */ }
-      }
+        } catch (e) { pullErr = e.message || String(e); }
+        setFocusStats({ companies: watchlist.length, raw, locOk, added, err: pullErr });
+      } else { setFocusStats({ companies: 0, raw: 0, locOk: 0, added: 0, err: "" }); }
 
       let merged = [...fresh, ...found];
       setFound(merged); saveKey("cs_found", merged);
@@ -789,7 +793,7 @@ function Tool({ signedInEmail, onSignOut }) {
         {tab === "profile" && <Profile profile={profile} setProfile={setProfile} save={saveProfile} saved={profileSaved} applyExtract={applyExtract} goCriteria={() => setTab("criteria")} />}
         {tab === "criteria" && <Criteria criteria={criteria} setCriteria={setCriteria} save={saveCriteria} saved={criteriaSaved} ready={criteriaReady} watchlist={watchlist} saveWatchlist={saveWatchlist} goCompanies={() => setTab("companies")} />}
         {tab === "companies" && <CompanyEngine criteria={criteria} library={library} suggestCompanies={suggestCompanies} normalizeCompanies={normalizeCompanies} resolveCompanies={resolveCompanies} addToLibrary={addToLibrary} removeFromLibrary={removeFromLibrary} setCompanyAts={setCompanyAts} goSonar={() => setTab("sonar")} />}
-        {tab === "sonar" && <Sonar found={found} ready={criteriaReady} runRadar={runRadar} radaring={radaring} scoreRoles={scoreRoles} scoring={scoring} clearFound={clearFound} scanStatus={scanStatus} lastScan={settings.lastScan} lastFresh={lastFresh} add={addToPipeline} removeFound={removeFound} verifyFound={verifyFound} verifyBusy={verifyBusy} restoreFound={restoreFound} workMode={criteria.workMode} pipeline={pipeline} library={library} goCriteria={() => setTab("criteria")} goSettings={() => setTab("settings")} />}
+        {tab === "sonar" && <Sonar found={found} ready={criteriaReady} runRadar={runRadar} radaring={radaring} scoreRoles={scoreRoles} scoring={scoring} clearFound={clearFound} scanStatus={scanStatus} lastScan={settings.lastScan} lastFresh={lastFresh} focusStats={focusStats} add={addToPipeline} removeFound={removeFound} verifyFound={verifyFound} verifyBusy={verifyBusy} restoreFound={restoreFound} workMode={criteria.workMode} pipeline={pipeline} library={library} goCriteria={() => setTab("criteria")} goSettings={() => setTab("settings")} goCompanies={() => setTab("companies")} />}
         {tab === "pipeline" && <Cockpit targets={openTargets} sel={sel} setSelId={setSelId} remove={removeTarget} research={researchTarget} draft={draftOutreach} busy={busy} patch={patchTarget} markApplied={markApplied} verifyTarget={verifyTarget} verifyBusy={verifyBusy} markOutdated={markOutdated} settings={settings} goSettings={() => setTab("settings")} appliedCount={appliedTargets.length} goSonar={() => setTab("sonar")} goTracker={() => setTab("tracker")} />}
         {tab === "tracker" && <Tracker targets={appliedTargets} patch={patchTarget} unApply={unApply} remove={removeTarget} goCockpit={() => setTab("pipeline")} />}
         {tab === "settings" && <SettingsTab settings={settings} update={updateSettings} foundCount={found.length} clearHistory={clearHistory} />}
@@ -1120,7 +1124,7 @@ function CompanyEngine({ criteria, library, suggestCompanies, normalizeCompanies
 function Pill({ active, onClick, children, color = C.teal }) {
   return <button onClick={onClick} style={{ padding: "5px 10px", borderRadius: 7, cursor: "pointer", fontFamily: MONO, fontSize: 10.5, letterSpacing: .3, border: `1px solid ${active ? color : C.line}`, background: active ? C.panel2 : "transparent", color: active ? color : C.dim }}>{children}</button>;
 }
-function Sonar({ found, ready, runRadar, radaring, scoreRoles, scoring, clearFound, scanStatus, lastScan, lastFresh, add, removeFound, verifyFound, verifyBusy, restoreFound, workMode, pipeline, library, goCriteria, goSettings }) {
+function Sonar({ found, ready, runRadar, radaring, scoreRoles, scoring, clearFound, scanStatus, lastScan, lastFresh, focusStats, add, removeFound, verifyFound, verifyBusy, restoreFound, workMode, pipeline, library, goCriteria, goSettings, goCompanies }) {
   const focusSet = new Set((library || []).map((c) => String(c.company || "").toLowerCase().trim()).filter(Boolean));
   const isFocus = (r) => focusSet.has(String(r.company || "").toLowerCase().trim());
   const [focusOnly, setFocusOnly] = useState(false);
@@ -1174,6 +1178,13 @@ function Sonar({ found, ready, runRadar, radaring, scoreRoles, scoring, clearFou
             </div>
           </div>
           <div style={{ marginTop: 12, height: 4, borderRadius: 99, background: C.line, overflow: "hidden" }}><div style={{ height: "100%", width: "40%", borderRadius: 99, background: C.teal, animation: "cs-slide 1.3s ease-in-out infinite" }} /></div>
+        </div>
+      )}
+      {!radaring && !scoring && focusStats && (
+        <div style={{ marginBottom: 14, padding: "10px 14px", borderRadius: 10, border: `1px solid ${C.line}`, background: C.panel2, fontFamily: MONO, fontSize: 11, color: C.dim, lineHeight: 1.55 }}>
+          {focusStats.companies === 0
+            ? <span>No focus companies are screenable yet. <button onClick={goCompanies} style={{ background: "transparent", border: "none", color: C.teal, cursor: "pointer", fontFamily: MONO, fontSize: 11, padding: 0 }}>Add their careers links in Companies →</button></span>
+            : <span><b style={{ color: C.text }}>Focus companies:</b> pulled {focusStats.raw} open role{focusStats.raw === 1 ? "" : "s"} from {focusStats.companies} screenable {focusStats.companies === 1 ? "company" : "companies"} · {focusStats.locOk} in your regions · <b style={{ color: focusStats.added ? C.green : C.amber }}>{focusStats.added} matched leadership titles</b>.{focusStats.raw > 0 && focusStats.added === 0 ? " The region or title filter removed the rest — widen your target titles/regions if needed." : ""}{focusStats.err ? " ⚠ pull error: " + focusStats.err : ""} <button onClick={goCompanies} style={{ background: "transparent", border: "none", color: C.teal, cursor: "pointer", fontFamily: MONO, fontSize: 11, padding: 0 }}>manage →</button></span>}
         </div>
       )}
       {found.length > 0 && (
