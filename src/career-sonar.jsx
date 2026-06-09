@@ -508,6 +508,17 @@ function Tool({ signedInEmail, onSignOut }) {
     saveLibrary(next); syncWatchlistFromLibrary(next);
   }
   function removeFromLibrary(id) { const next = library.filter((c) => c.id !== id); saveLibrary(next); syncWatchlistFromLibrary(next); }
+  function setCompanyAts(id, url) {
+    const p = parseAtsUrl(url);
+    const next = library.map((c) => {
+      if (c.id !== id) return c;
+      if (!p) return { ...c, atsNote: "Couldn't read that URL — paste the full careers/ATS link." };
+      if (p.ats) return { ...c, ats: p.ats, token: p.token, screenable: true, unsupported: null, atsNote: null };
+      if (p.unsupported) return { ...c, ats: null, token: null, screenable: false, unsupported: p.unsupported, atsNote: null };
+      return { ...c, atsNote: "Unrecognized ATS (" + (p.unknown || "?") + ") — we may need to add support." };
+    });
+    saveLibrary(next); syncWatchlistFromLibrary(next);
+  }
   async function suggestCompanies(seeds) {
     const arr = extractJSON(await callClaude(buildCompanySuggestPrompt(seeds, criteria), false));
     return Array.isArray(arr) ? arr.filter((c) => c && c.name) : [];
@@ -657,26 +668,6 @@ function Tool({ signedInEmail, onSignOut }) {
         } catch (e) { /* radar already succeeded — ignore ATS errors */ }
       }
 
-      // 2b) focus companies via TheirStack by domain/name — covers ALL library companies (no ATS token needed)
-      if (library.length) {
-        setScanStatus("scanning your focus companies…");
-        try {
-          const domains = Array.from(new Set(library.map((c) => String(c.domain || "").replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/\/.*$/, "").trim()).filter(Boolean)));
-          const names = Array.from(new Set(library.filter((c) => !c.domain).map((c) => String(c.company || "").trim()).filter(Boolean)));
-          if (domains.length || names.length) {
-            const fres = await fetch("/api/radar", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ titles: useTitles, countries, homeCountries, broadRemote, companyDomains: domains, companyNames: names, maxAgeDays: Math.max(7, Math.min(120, settings.radarDays || 45)), limit: Math.max(10, Math.min(50, settings.radarLimit || 50)) }) });
-            const fdata = await fres.json().catch(() => ({}));
-            if (fres.ok) {
-              for (const j of (Array.isArray(fdata.jobs) ? fdata.jobs : [])) {
-                if (!j.company || !j.title) continue;
-                const k = roleKey(j); if (seen.has(k)) continue; seen.add(k);
-                fresh.push({ id: Date.now() + "" + Math.random().toString(36).slice(2, 6), company: j.company, title: j.title, location: j.location || "", link: j.link || "", source: j.source || "Radar", fit: "", signal: "", posted: j.posted || "", score: null, foundAt: Date.now(), radar: true, focus: true, co: j.co || undefined });
-              }
-            }
-          }
-        } catch (e) { /* ignore focus-query errors */ }
-      }
-
       let merged = [...fresh, ...found];
       setFound(merged); saveKey("cs_found", merged);
       setLastFresh(fresh.length);
@@ -797,7 +788,7 @@ function Tool({ signedInEmail, onSignOut }) {
       <div style={{ padding: 22 }}>
         {tab === "profile" && <Profile profile={profile} setProfile={setProfile} save={saveProfile} saved={profileSaved} applyExtract={applyExtract} goCriteria={() => setTab("criteria")} />}
         {tab === "criteria" && <Criteria criteria={criteria} setCriteria={setCriteria} save={saveCriteria} saved={criteriaSaved} ready={criteriaReady} watchlist={watchlist} saveWatchlist={saveWatchlist} goCompanies={() => setTab("companies")} />}
-        {tab === "companies" && <CompanyEngine criteria={criteria} library={library} suggestCompanies={suggestCompanies} normalizeCompanies={normalizeCompanies} resolveCompanies={resolveCompanies} addToLibrary={addToLibrary} removeFromLibrary={removeFromLibrary} goSonar={() => setTab("sonar")} />}
+        {tab === "companies" && <CompanyEngine criteria={criteria} library={library} suggestCompanies={suggestCompanies} normalizeCompanies={normalizeCompanies} resolveCompanies={resolveCompanies} addToLibrary={addToLibrary} removeFromLibrary={removeFromLibrary} setCompanyAts={setCompanyAts} goSonar={() => setTab("sonar")} />}
         {tab === "sonar" && <Sonar found={found} ready={criteriaReady} runRadar={runRadar} radaring={radaring} scoreRoles={scoreRoles} scoring={scoring} clearFound={clearFound} scanStatus={scanStatus} lastScan={settings.lastScan} lastFresh={lastFresh} add={addToPipeline} removeFound={removeFound} verifyFound={verifyFound} verifyBusy={verifyBusy} restoreFound={restoreFound} workMode={criteria.workMode} pipeline={pipeline} library={library} goCriteria={() => setTab("criteria")} goSettings={() => setTab("settings")} />}
         {tab === "pipeline" && <Cockpit targets={openTargets} sel={sel} setSelId={setSelId} remove={removeTarget} research={researchTarget} draft={draftOutreach} busy={busy} patch={patchTarget} markApplied={markApplied} verifyTarget={verifyTarget} verifyBusy={verifyBusy} markOutdated={markOutdated} settings={settings} goSettings={() => setTab("settings")} appliedCount={appliedTargets.length} goSonar={() => setTab("sonar")} goTracker={() => setTab("tracker")} />}
         {tab === "tracker" && <Tracker targets={appliedTargets} patch={patchTarget} unApply={unApply} remove={removeTarget} goCockpit={() => setTab("pipeline")} />}
@@ -940,7 +931,34 @@ function Criteria({ criteria, setCriteria, save, saved, ready, watchlist, saveWa
 }
 
 /* ---------------- 03 · Companies (Top Company Engine + Library) ---------------- */
-function CompanyEngine({ criteria, library, suggestCompanies, normalizeCompanies, resolveCompanies, addToLibrary, removeFromLibrary, goSonar }) {
+// Parse a careers / ATS URL into an exact { ats, token } (no guessing). Flags known-but-unsupported systems.
+function parseAtsUrl(raw) {
+  let u = String(raw || "").trim();
+  if (!u) return null;
+  if (!/^https?:\/\//i.test(u)) u = "https://" + u;
+  let host = "", seg = [];
+  try { const x = new URL(u); host = x.hostname.toLowerCase().replace(/^www\./, ""); seg = x.pathname.split("/").filter(Boolean); } catch (e) { return null; }
+  if (host === "boards.greenhouse.io" || host === "job-boards.greenhouse.io") { if (seg[0]) return { ats: "greenhouse", token: seg[0] }; }
+  if (host.endsWith(".greenhouse.io")) { const t = host.replace(".greenhouse.io", ""); if (t) return { ats: "greenhouse", token: t }; }
+  if (host === "jobs.lever.co" || host.endsWith(".lever.co")) { if (seg[0]) return { ats: "lever", token: seg[0] }; }
+  if (host === "jobs.ashbyhq.com" || host === "app.ashbyhq.com") { if (seg[0]) return { ats: "ashby", token: seg[0] }; }
+  if (host.endsWith(".ashbyhq.com")) { const t = host.replace(".ashbyhq.com", ""); if (t) return { ats: "ashby", token: t }; }
+  if (host.includes("smartrecruiters.com")) { if (seg[0]) return { ats: "smartrecruiters", token: seg[0] }; }
+  if (host === "apply.workable.com" || host === "jobs.workable.com") { if (seg[0]) return { ats: "workable", token: seg[0] }; }
+  if (host.endsWith(".workable.com")) { const t = host.replace(".workable.com", ""); if (t) return { ats: "workable", token: t }; }
+  if (host.endsWith(".recruitee.com")) { const t = host.replace(".recruitee.com", ""); if (t && t !== "recruitee") return { ats: "recruitee", token: t }; }
+  if (host.includes("personio")) { const t = host.split(".")[0]; if (t && t !== "www") return { ats: "personio", token: t }; }
+  if (host.includes("myworkdayjobs.com") || host.includes(".workday.com")) return { unsupported: "Workday" };
+  if (host.includes("taleo")) return { unsupported: "Taleo" };
+  if (host.includes("successfactors") || host.includes("sapsf")) return { unsupported: "SuccessFactors" };
+  if (host.includes("icims")) return { unsupported: "iCIMS" };
+  if (host.includes("oraclecloud") || host.includes("oracle")) return { unsupported: "Oracle" };
+  if (host.includes("bamboohr")) return { unsupported: "BambooHR" };
+  return { unknown: host };
+}
+
+function CompanyEngine({ criteria, library, suggestCompanies, normalizeCompanies, resolveCompanies, addToLibrary, removeFromLibrary, setCompanyAts, goSonar }) {
+  const [linkDrafts, setLinkDrafts] = useState({});
   const [seeds, setSeeds] = useState(toArr(criteria.exampleCompanies));
   const [suggestions, setSuggestions] = useState([]);
   const [checked, setChecked] = useState({});
@@ -1074,13 +1092,21 @@ function CompanyEngine({ criteria, library, suggestCompanies, normalizeCompanies
         ) : (
           <div style={{ display: "grid", gap: 7 }}>
             {library.map((c) => (
-              <div key={c.id} style={{ display: "flex", alignItems: "center", gap: 12, padding: "11px 13px", borderRadius: 9, border: `1px solid ${C.line}`, background: C.panel }}>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}><span style={{ fontWeight: 600, fontSize: 14, fontFamily: SERIF }}>{c.company}</span>{c.domain && <span style={{ fontFamily: MONO, fontSize: 10.5, color: C.faint }}>{c.domain}</span>}</div>
+              <div key={c.id} style={{ padding: "11px 13px", borderRadius: 9, border: `1px solid ${C.line}`, background: C.panel }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}><span style={{ fontWeight: 600, fontSize: 14, fontFamily: SERIF }}>{c.company}</span>{c.domain && <span style={{ fontFamily: MONO, fontSize: 10.5, color: C.faint }}>{c.domain}</span>}</div>
+                  </div>
+                  {c.screenable ? <span style={{ fontFamily: MONO, fontSize: 10, color: C.green, border: `1px solid ${C.green}`, borderRadius: 999, padding: "3px 10px", whiteSpace: "nowrap" }}>✓ {c.ats}{c.jobCount ? " · " + c.jobCount + " open" : ""}</span>
+                    : c.unsupported ? <span style={{ fontFamily: MONO, fontSize: 10, color: C.amber, border: `1px solid ${C.amber}`, borderRadius: 999, padding: "3px 10px", whiteSpace: "nowrap" }}>⛔ {c.unsupported} — integration needed</span>
+                    : <span style={{ fontFamily: MONO, fontSize: 10, color: C.faint, border: `1px solid ${C.line}`, borderRadius: 999, padding: "3px 10px", whiteSpace: "nowrap" }}>⚠ ATS not detected</span>}
+                  <button onClick={() => removeFromLibrary(c.id)} style={{ background: "transparent", border: "none", cursor: "pointer", color: C.faint, display: "inline-flex" }}><X size={15} /></button>
                 </div>
-                {c.screenable ? <span style={{ fontFamily: MONO, fontSize: 10, color: C.green, border: `1px solid ${C.green}`, borderRadius: 999, padding: "3px 10px" }}>ATS: {c.ats}{c.jobCount ? " · " + c.jobCount + " open" : ""}</span>
-                  : <span style={{ fontFamily: MONO, fontSize: 10, color: C.faint, border: `1px solid ${C.line}`, borderRadius: 999, padding: "3px 10px" }}>not auto-screenable</span>}
-                <button onClick={() => removeFromLibrary(c.id)} style={{ background: "transparent", border: "none", cursor: "pointer", color: C.faint, display: "inline-flex" }}><X size={15} /></button>
+                {!c.screenable && <div style={{ marginTop: 9, display: "flex", gap: 7, alignItems: "center" }}>
+                  <input value={linkDrafts[c.id] || ""} onChange={(e) => setLinkDrafts({ ...linkDrafts, [c.id]: e.target.value })} onKeyDown={(e) => { if (e.key === "Enter" && linkDrafts[c.id]) setCompanyAts(c.id, linkDrafts[c.id]); }} placeholder="paste careers / ATS URL — e.g. boards.greenhouse.io/datadog" className="cs-in" style={{ flex: 1, minWidth: 0, padding: "7px 10px", borderRadius: 7, border: `1px solid ${C.line}`, background: C.bg, color: C.text, fontFamily: MONO, fontSize: 11, outline: "none" }} />
+                  <button onClick={() => linkDrafts[c.id] && setCompanyAts(c.id, linkDrafts[c.id])} style={{ flexShrink: 0, padding: "7px 13px", borderRadius: 7, border: `1px solid ${C.teal}`, background: C.panel2, color: C.teal, cursor: "pointer", fontFamily: MONO, fontSize: 11, fontWeight: 700 }}>SET</button>
+                </div>}
+                {c.atsNote && <div style={{ marginTop: 6, fontFamily: MONO, fontSize: 10, color: C.amber }}>{c.atsNote}</div>}
               </div>
             ))}
           </div>
