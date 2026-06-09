@@ -257,6 +257,13 @@ Return 8-14 short job-title search patterns (2-4 words each): the given titles p
 
 Respond with ONLY a JSON array, e.g.: ["VP Sales","Vice President of Sales","Chief Revenue Officer","Head of Sales"]`;
 
+const buildEnrichPrompt = (items) => `For each company below, give a COMPACT factual snapshot from your OWN knowledge to help a candidate quickly evaluate it. Do NOT search. Use only what you reasonably know; if unsure about a field, return "" (empty) — never guess revenue or fabricate numbers.
+Fields per company: "type" (exactly one of: Startup, Scale-up, Growth, Enterprise, Public), "industry" (1-3 words, e.g. "Cybersecurity", "Dev tools", "Fintech"), "hq" ("City, Country"), "size" (employee band: "11-50","50-200","200-500","500-1k","1k-5k","5k-10k","10k+"), "founded" (year), "funding" (very short ownership note: "Series C", "Public NASDAQ:DDOG", "PE-owned", "Bootstrapped"), "domain" (primary website, e.g. "datadog.com").
+COMPANIES:
+${items.map((c) => `${c.n}. ${c.company}${c.hint ? ` — ${c.hint}` : ""}`).join("\n")}
+Respond with ONLY a compact minified JSON array, one object per company, echoing its "n":
+[{"n":1,"type":"","industry":"","hq":"","size":"","founded":"","funding":"","domain":""}]`;
+
 const buildScorePrompt = (profile, criteria, roles) => `You are scoring how well each job fits THIS candidate. Use only the information given; do NOT search. Return ONLY compact minified JSON.
 
 CANDIDATE
@@ -377,7 +384,7 @@ const MARKETS = {
   "Remote LATAM": ["MX", "BR", "AR", "CO", "CL"],
   "US Remote": ["US"],
 };
-const EMPTY_SETTINGS = { breadth: 8, autoScan: false, verifyOnScan: true, lastScan: 0, msgTone: "Warm & direct", msgLength: "Standard", msgMetrics: false, msgLang: "Auto", msgSign: "", msgGuidance: "", msgExample: "" };
+const EMPTY_SETTINGS = { breadth: 8, radarLimit: 50, radarDays: 45, autoScan: false, verifyOnScan: true, lastScan: 0, msgTone: "Warm & direct", msgLength: "Standard", msgMetrics: false, msgLang: "Auto", msgSign: "", msgGuidance: "", msgExample: "" };
 const TONES = ["Warm & direct", "Formal & precise", "Casual & punchy", "Consultative"];
 const LENGTHS = ["Concise", "Standard", "Detailed"];
 const LANGS = ["Auto", "English", "German"];
@@ -570,6 +577,34 @@ function Tool({ signedInEmail, onSignOut }) {
     return working;
   }
 
+  async function enrichWorking(startWorking) {
+    let working = startWorking;
+    const lacks = (r) => !r.outdated && !r.dismissed && (!r.co || !(r.co.type || r.co.industry || r.co.hq || r.co.size));
+    const companies = []; const seenC = new Set();
+    working.forEach((r) => { const key = String(r.company || "").toLowerCase(); if (lacks(r) && key && !seenC.has(key)) { seenC.add(key); companies.push({ company: r.company, hint: (r.co && r.co.industry) || "" }); } });
+    if (!companies.length) return working;
+    const size = 14;
+    for (let i = 0; i < companies.length; i += size) {
+      const chunk = companies.slice(i, i + size).map((c, idx) => ({ n: idx + 1, company: c.company, hint: c.hint }));
+      setScanStatus(`enriching companies ${Math.min(i + size, companies.length)}/${companies.length}…`);
+      let arr = [];
+      try { arr = extractJSON(await callClaude(buildEnrichPrompt(chunk), false, HAIKU)); } catch (e) { arr = []; }
+      const byName = {};
+      (Array.isArray(arr) ? arr : []).forEach((o) => { const c = chunk.find((x) => x.n === o.n); if (c) byName[c.company.toLowerCase()] = o; });
+      working = working.map((r) => {
+        const o = byName[String(r.company || "").toLowerCase()];
+        if (!o) return r;
+        const aiCo = { type: o.type || "", industry: o.industry || "", hq: o.hq || "", size: o.size || "", founded: o.founded || "", funding: o.funding || "", domain: o.domain || "" };
+        const realCo = r.co || {};
+        const merged = { ...aiCo };
+        Object.keys(realCo).forEach((k) => { if (realCo[k]) merged[k] = realCo[k]; }); // real (TheirStack) data wins
+        return Object.values(merged).some(Boolean) ? { ...r, co: merged } : r;
+      });
+      setFound(working); saveKey("cs_found", working);
+    }
+    return working;
+  }
+
   async function runRadar() {
     setErr(""); setRadaring(true); setScanStatus("building your query…");
     try {
@@ -595,7 +630,7 @@ function Tool({ signedInEmail, onSignOut }) {
 
       // 1) market radar (already radius-filtered server-side)
       setScanStatus("scanning the market…");
-      const res = await fetch("/api/radar", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ titles: useTitles, countries, homeCountries, broadRemote, descriptionPatterns: patterns, maxAgeDays: 30, limit: 25 }) });
+      const res = await fetch("/api/radar", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ titles: useTitles, countries, homeCountries, broadRemote, descriptionPatterns: patterns, maxAgeDays: Math.max(7, Math.min(120, settings.radarDays || 45)), limit: Math.max(10, Math.min(50, settings.radarLimit || 50)) }) });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || ("Radar error " + res.status));
       for (const j of (Array.isArray(data.jobs) ? data.jobs : [])) {
@@ -622,21 +657,43 @@ function Tool({ signedInEmail, onSignOut }) {
         } catch (e) { /* radar already succeeded — ignore ATS errors */ }
       }
 
+      // 2b) focus companies via TheirStack by domain/name — covers ALL library companies (no ATS token needed)
+      if (library.length) {
+        setScanStatus("scanning your focus companies…");
+        try {
+          const domains = Array.from(new Set(library.map((c) => String(c.domain || "").replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/\/.*$/, "").trim()).filter(Boolean)));
+          const names = Array.from(new Set(library.filter((c) => !c.domain).map((c) => String(c.company || "").trim()).filter(Boolean)));
+          if (domains.length || names.length) {
+            const fres = await fetch("/api/radar", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ titles: useTitles, countries, homeCountries, broadRemote, companyDomains: domains, companyNames: names, maxAgeDays: Math.max(7, Math.min(120, settings.radarDays || 45)), limit: Math.max(10, Math.min(50, settings.radarLimit || 50)) }) });
+            const fdata = await fres.json().catch(() => ({}));
+            if (fres.ok) {
+              for (const j of (Array.isArray(fdata.jobs) ? fdata.jobs : [])) {
+                if (!j.company || !j.title) continue;
+                const k = roleKey(j); if (seen.has(k)) continue; seen.add(k);
+                fresh.push({ id: Date.now() + "" + Math.random().toString(36).slice(2, 6), company: j.company, title: j.title, location: j.location || "", link: j.link || "", source: j.source || "Radar", fit: "", signal: "", posted: j.posted || "", score: null, foundAt: Date.now(), radar: true, focus: true, co: j.co || undefined });
+              }
+            }
+          }
+        } catch (e) { /* ignore focus-query errors */ }
+      }
+
       let merged = [...fresh, ...found];
       setFound(merged); saveKey("cs_found", merged);
       setLastFresh(fresh.length);
 
-      // 3) always score the new roles
+      // 3) always score the new roles, then enrich any company missing a snapshot
       if (fresh.length) { merged = await scoreWorking(merged); }
+      merged = await enrichWorking(merged);
     } catch (e) { setErr("Radar failed: " + e.message); }
     setScanStatus(""); setRadaring(false);
   }
 
   async function scoreRoles() {
-    const targets = found.filter((r) => !r.outdated && !r.dismissed && r.score == null);
-    if (!targets.length) { setErr("No unscored roles — everything's already scored."); return; }
+    const needScore = found.some((r) => !r.outdated && !r.dismissed && r.score == null);
+    const needCo = found.some((r) => !r.outdated && !r.dismissed && (!r.co || !(r.co.type || r.co.industry || r.co.hq || r.co.size)));
+    if (!needScore && !needCo) { setErr("Everything's already scored & enriched."); return; }
     setErr(""); setScoring(true);
-    try { await scoreWorking([...found]); } catch (e) { setErr("Scoring failed: " + e.message); }
+    try { let w = await scoreWorking([...found]); w = await enrichWorking(w); } catch (e) { setErr("Scoring failed: " + e.message); }
     setScanStatus(""); setScoring(false);
   }
 
@@ -741,7 +798,7 @@ function Tool({ signedInEmail, onSignOut }) {
         {tab === "profile" && <Profile profile={profile} setProfile={setProfile} save={saveProfile} saved={profileSaved} applyExtract={applyExtract} goCriteria={() => setTab("criteria")} />}
         {tab === "criteria" && <Criteria criteria={criteria} setCriteria={setCriteria} save={saveCriteria} saved={criteriaSaved} ready={criteriaReady} watchlist={watchlist} saveWatchlist={saveWatchlist} goCompanies={() => setTab("companies")} />}
         {tab === "companies" && <CompanyEngine criteria={criteria} library={library} suggestCompanies={suggestCompanies} normalizeCompanies={normalizeCompanies} resolveCompanies={resolveCompanies} addToLibrary={addToLibrary} removeFromLibrary={removeFromLibrary} goSonar={() => setTab("sonar")} />}
-        {tab === "sonar" && <Sonar found={found} ready={criteriaReady} runRadar={runRadar} radaring={radaring} scoreRoles={scoreRoles} scoring={scoring} clearFound={clearFound} scanStatus={scanStatus} lastScan={settings.lastScan} lastFresh={lastFresh} add={addToPipeline} removeFound={removeFound} verifyFound={verifyFound} verifyBusy={verifyBusy} restoreFound={restoreFound} workMode={criteria.workMode} pipeline={pipeline} goCriteria={() => setTab("criteria")} goSettings={() => setTab("settings")} />}
+        {tab === "sonar" && <Sonar found={found} ready={criteriaReady} runRadar={runRadar} radaring={radaring} scoreRoles={scoreRoles} scoring={scoring} clearFound={clearFound} scanStatus={scanStatus} lastScan={settings.lastScan} lastFresh={lastFresh} add={addToPipeline} removeFound={removeFound} verifyFound={verifyFound} verifyBusy={verifyBusy} restoreFound={restoreFound} workMode={criteria.workMode} pipeline={pipeline} library={library} goCriteria={() => setTab("criteria")} goSettings={() => setTab("settings")} />}
         {tab === "pipeline" && <Cockpit targets={openTargets} sel={sel} setSelId={setSelId} remove={removeTarget} research={researchTarget} draft={draftOutreach} busy={busy} patch={patchTarget} markApplied={markApplied} verifyTarget={verifyTarget} verifyBusy={verifyBusy} markOutdated={markOutdated} settings={settings} goSettings={() => setTab("settings")} appliedCount={appliedTargets.length} goSonar={() => setTab("sonar")} goTracker={() => setTab("tracker")} />}
         {tab === "tracker" && <Tracker targets={appliedTargets} patch={patchTarget} unApply={unApply} remove={removeTarget} goCockpit={() => setTab("pipeline")} />}
         {tab === "settings" && <SettingsTab settings={settings} update={updateSettings} foundCount={found.length} clearHistory={clearHistory} />}
@@ -1037,7 +1094,10 @@ function CompanyEngine({ criteria, library, suggestCompanies, normalizeCompanies
 function Pill({ active, onClick, children, color = C.teal }) {
   return <button onClick={onClick} style={{ padding: "5px 10px", borderRadius: 7, cursor: "pointer", fontFamily: MONO, fontSize: 10.5, letterSpacing: .3, border: `1px solid ${active ? color : C.line}`, background: active ? C.panel2 : "transparent", color: active ? color : C.dim }}>{children}</button>;
 }
-function Sonar({ found, ready, runRadar, radaring, scoreRoles, scoring, clearFound, scanStatus, lastScan, lastFresh, add, removeFound, verifyFound, verifyBusy, restoreFound, workMode, pipeline, goCriteria, goSettings }) {
+function Sonar({ found, ready, runRadar, radaring, scoreRoles, scoring, clearFound, scanStatus, lastScan, lastFresh, add, removeFound, verifyFound, verifyBusy, restoreFound, workMode, pipeline, library, goCriteria, goSettings }) {
+  const focusSet = new Set((library || []).map((c) => String(c.company || "").toLowerCase().trim()).filter(Boolean));
+  const isFocus = (r) => focusSet.has(String(r.company || "").toLowerCase().trim());
+  const [focusOnly, setFocusOnly] = useState(false);
   const unscored = found.filter((r) => !r.outdated && !r.dismissed && r.score == null).length;
   const [minScore, setMin] = useState(0);
   const [locSel, setLocSel] = useState([]);
@@ -1051,6 +1111,7 @@ function Sonar({ found, ready, runRadar, radaring, scoreRoles, scoring, clearFou
   const hiddenCount = found.filter((r) => r.outdated || r.dismissed || inCockpit(r)).length;
   const activeCount = found.length - hiddenCount;
   const liveCount = found.filter((r) => r.verify?.status === "open").length;
+  const focusCount = found.filter((r) => !r.outdated && !r.dismissed && !inCockpit(r) && isFocus(r)).length;
   const countryCounts = {}; let remoteBucketN = 0;
   found.forEach((f) => { if (f.outdated || f.dismissed) return; const cs = roleCountries(f.location); if (!cs.length) remoteBucketN++; else cs.forEach((c) => { countryCounts[c] = (countryCounts[c] || 0) + 1; }); });
   const countryOpts = Object.keys(countryCounts).sort((a, b) => countryCounts[b] - countryCounts[a] || a.localeCompare(b));
@@ -1058,6 +1119,7 @@ function Sonar({ found, ready, runRadar, radaring, scoreRoles, scoring, clearFou
     if (workMode === "Remote only" && /hybrid|on-?site|in[- ]?office/i.test(r.location || "")) return false;
     if (liveOnly && r.verify?.status !== "open") return false;
     if (!showOutdated && (r.outdated || r.dismissed || inCockpit(r))) return false;
+    if (focusOnly && !isFocus(r)) return false;
     if (minScore && (r.score == null || r.score < minScore)) return false;
     if (locSel.length) { const rc = roleCountries(r.location); const inRemote = locSel.includes(REMOTE_BUCKET) && !rc.length; if (!inRemote && !rc.some((c) => locSel.includes(c))) return false; }
     if (recency !== "all") { const d = daysOpen(r.foundAt); if (recency === "today" && d > 0) return false; if (recency === "week" && d > 7) return false; }
@@ -1095,6 +1157,7 @@ function Sonar({ found, ready, runRadar, radaring, scoreRoles, scoring, clearFou
           <div style={{ display: "flex", gap: 6, alignItems: "center" }}><span style={{ fontFamily: MONO, fontSize: 10, color: C.faint }}>FOUND</span>{[["all", "ANY"], ["week", "≤7d"], ["today", "TODAY"]].map(([v, l]) => <Pill key={v} active={recency === v} onClick={() => setRecency(v)} color={C.violet}>{l}</Pill>)}</div>
           {(countryOpts.length > 0 || remoteBucketN > 0) && <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}><span style={{ fontFamily: MONO, fontSize: 10, color: C.faint }}>LOCATION</span><Pill active={locSel.length === 0} onClick={() => setLocSel([])} color={C.teal}>ALL</Pill>{countryOpts.map((c) => <Pill key={c} active={locSel.includes(c)} onClick={() => setLocSel(locSel.includes(c) ? locSel.filter((x) => x !== c) : [...locSel, c])} color={C.teal}>{c}{countryCounts[c] ? " (" + countryCounts[c] + ")" : ""}</Pill>)}{remoteBucketN > 0 && <Pill active={locSel.includes(REMOTE_BUCKET)} onClick={() => setLocSel(locSel.includes(REMOTE_BUCKET) ? locSel.filter((x) => x !== REMOTE_BUCKET) : [...locSel, REMOTE_BUCKET])} color={C.teal}>{REMOTE_BUCKET} ({remoteBucketN})</Pill>}</div>}
           <Pill active={liveOnly} onClick={() => setLiveOnly(!liveOnly)} color={C.green}>✓ LIVE ONLY{liveCount ? " (" + liveCount + ")" : ""}</Pill>
+          {focusSet.size > 0 && <Pill active={focusOnly} onClick={() => setFocusOnly(!focusOnly)} color={C.teal}>★ FOCUS{focusCount ? " (" + focusCount + ")" : ""}</Pill>}
           {hiddenCount > 0 && <Pill active={showOutdated} onClick={() => setShowOutdated(!showOutdated)} color={C.faint}>{showOutdated ? "HIDE" : "SHOW"} HANDLED ({hiddenCount})</Pill>}
           <span style={{ marginLeft: "auto", fontFamily: MONO, fontSize: 10.5, color: C.faint }}>{list.length} shown{activeCount - list.length > 0 ? ` · ${activeCount - list.length} filtered` : ""}{hiddenCount ? ` · ${hiddenCount} handled` : ""}</span>
         </div>
@@ -1112,7 +1175,7 @@ function Sonar({ found, ready, runRadar, radaring, scoreRoles, scoring, clearFou
                 <div style={{ flex: 1, display: "flex", gap: 12, minWidth: 0 }}>
                   <Logo domain={r.co && r.co.domain} name={r.company} size={42} />
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 3 }}><span style={{ fontSize: 17, fontWeight: 800, fontFamily: SERIF, letterSpacing: -.3 }}>{r.company}</span>{r.co && r.co.type && <Tag color={stageColor(r.co.type)} text={r.co.type} />}{r.dismissed && <Tag color={C.faint} text="DISMISSED" />}{r.outdated && !r.dismissed && <Tag color={C.faint} text="OUTDATED" />}<VerifyBadge verify={r.verify} checking={verifyBusy[r.id]} /></div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 3 }}><span style={{ fontSize: 17, fontWeight: 800, fontFamily: SERIF, letterSpacing: -.3 }}>{r.company}</span>{isFocus(r) && <Tag color={C.teal} text="★ FOCUS" />}{r.co && r.co.type && <Tag color={stageColor(r.co.type)} text={r.co.type} />}{r.dismissed && <Tag color={C.faint} text="DISMISSED" />}{r.outdated && !r.dismissed && <Tag color={C.faint} text="OUTDATED" />}<VerifyBadge verify={r.verify} checking={verifyBusy[r.id]} /></div>
                     <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 6, flexWrap: "wrap" }}><ScoreBadge score={r.score} /><span style={{ fontSize: 14.5, fontWeight: 600, fontFamily: SERIF, color: C.text }}>{r.title}</span></div>
                     <div style={{ fontFamily: MONO, fontSize: 11, color: C.dim, marginBottom: r.co && (r.co.industry || r.co.size || r.co.hq || r.co.founded || r.co.funding) ? 5 : 8 }}>{r.location}{r.posted ? " · posted " + r.posted : ""}{r.source ? " · via " + r.source : ""} · found {agoLabel(r.foundAt)}</div>
                     {r.co && (r.co.industry || r.co.size || r.co.hq || r.co.founded || r.co.funding) && <div style={{ fontFamily: MONO, fontSize: 10.5, color: C.dim, marginBottom: 8, lineHeight: 1.5 }}>{[r.co.industry, r.co.size && (r.co.size + " emp"), r.co.hq && ("HQ " + r.co.hq), r.co.founded && ("est. " + r.co.founded), r.co.funding].filter(Boolean).join("  ·  ")}</div>}
@@ -1240,9 +1303,12 @@ function SettingsTab({ settings, update, foundCount, clearHistory }) {
       </div>
 
       <div style={{ border: `1px solid ${C.line}`, borderRadius: 10, padding: 16, marginBottom: 14, background: C.panel }}>
-        <div style={{ fontFamily: MONO, fontSize: 12, letterSpacing: .5, marginBottom: 4 }}>SCAN BREADTH <span style={{ color: C.faint }}>— roles per scan</span></div>
-        <p style={{ margin: "0 0 12px", color: C.dim, fontSize: 12.5, lineHeight: 1.5 }}>Your “radius”. Fewer per scan is cheaper and more reliable; coverage builds up across scans because results accumulate and never repeat.</p>
-        <div style={{ display: "flex", gap: 8 }}>{[5, 8, 10].map((n) => <Pill key={n} active={settings.breadth === n} onClick={() => update({ breadth: n })}>{n} / scan</Pill>)}</div>
+        <div style={{ fontFamily: MONO, fontSize: 12, letterSpacing: .5, marginBottom: 4 }}>MARKET RADAR DEPTH</div>
+        <p style={{ margin: "0 0 12px", color: C.dim, fontSize: 12.5, lineHeight: 1.5 }}>How many market roles each scan pulls, and how far back it looks. More = more coverage, but TheirStack charges 1 credit per role returned, so a 50-role scan ≈ 50 credits. Re-running mostly resurfaces the same top roles — the list grows as new jobs get posted, so widening the look-back surfaces more.</p>
+        <div style={{ fontFamily: MONO, fontSize: 10.5, color: C.faint, marginBottom: 6 }}>RESULTS PER SCAN</div>
+        <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>{[25, 50].map((n) => <Pill key={n} active={(settings.radarLimit || 50) === n} onClick={() => update({ radarLimit: n })}>{n} / scan</Pill>)}</div>
+        <div style={{ fontFamily: MONO, fontSize: 10.5, color: C.faint, marginBottom: 6 }}>LOOK BACK</div>
+        <div style={{ display: "flex", gap: 8 }}>{[[30, "30 days"], [45, "45 days"], [60, "60 days"], [90, "90 days"]].map(([n, l]) => <Pill key={n} active={(settings.radarDays || 45) === n} onClick={() => update({ radarDays: n })}>{l}</Pill>)}</div>
       </div>
 
       <div style={{ border: `1px solid ${C.line}`, borderRadius: 10, padding: 16, marginBottom: 14, background: C.panel }}>
