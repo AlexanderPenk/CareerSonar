@@ -21,7 +21,10 @@ export default async function handler(req, res) {
     if (!key) { res.status(500).json({ error: "ANTHROPIC_API_KEY is not set in Vercel environment variables." }); return; }
 
     const body = typeof req.body === "string" ? JSON.parse(req.body || "{}") : (req.body || {});
-    const content = String(body.content || "");
+    // content may be a plain string OR an array of content blocks (e.g. a PDF document block + text).
+    // Never String()-coerce an array — that destroys the document block and the PDF never reaches the model.
+    const raw = body.content;
+    const content = (typeof raw === "string" || Array.isArray(raw)) ? raw : String(raw || "");
     const useSearch = !!body.useSearch;
     const model = ALLOWED.has(body.model) ? body.model : DEFAULT_MODEL;
 
